@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1000" height="600" viewBox="0 0 1000 600">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="80%">
+      <stop offset="0%" stop-color="#0a1228"/>
+      <stop offset="55%" stop-color="#050b18"/>
+      <stop offset="100%" stop-color="#02040a"/>
+    </radialGradient>
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.95"/>
+      <stop offset="35%" stop-color="#38bdf8" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="coreBody" cx="50%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#f0fdff"/>
+      <stop offset="30%" stop-color="#7dd3fc"/>
+      <stop offset="70%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#172554"/>
+    </radialGradient>
+    <linearGradient id="ring1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="ring2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="ring3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#22d3ee"/>
+      <stop offset="75%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#67e8f9"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <filter id="blurSoft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <filter id="blurWide" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <filter id="textGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="600" fill="url(#bg)"/>
+
+  <!-- Holographic grid -->
+  <g stroke="#1e3a8a" stroke-opacity="0.18" stroke-width="1">
+    <path d="M0 120 H1000 M0 240 H1000 M0 360 H1000 M0 480 H1000"/>
+    <path d="M200 0 V600 M400 0 V600 M600 0 V600 M800 0 V600"/>
+  </g>
+  <circle cx="500" cy="300" r="280" fill="none" stroke="#1e3a8a" stroke-opacity="0.12" stroke-width="1"/>
+
+  <!-- Outer ambient glow -->
+  <ellipse cx="500" cy="300" rx="330" ry="250" fill="url(#coreGlow)" filter="url(#blurWide)">
+    <animate attributeName="opacity" values="0.6;1;0.6" dur="5s" repeatCount="indefinite"/>
+  </ellipse>
+
+  <!-- Orbital ring 1 (rotating) -->
+  <g>
+    <animateTransform attributeName="transform" type="rotate" from="0 500 300" to="360 500 300" dur="22s" repeatCount="indefinite"/>
+    <ellipse cx="500" cy="300" rx="300" ry="120" fill="none" stroke="url(#ring1)" stroke-width="1.5" stroke-opacity="0.55"/>
+    <circle cx="800" cy="300" r="4" fill="#22d3ee" filter="url(#textGlow)">
+      <animate attributeName="opacity" values="1;0.3;1" dur="2s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Orbital ring 2 (rotating, tilted look) -->
+  <g transform="rotate(18 500 300)">
+    <g>
+      <animateTransform attributeName="transform" type="rotate" from="0 500 300" to="-360 500 300" dur="30s" repeatCount="indefinite"/>
+      <ellipse cx="500" cy="300" rx="245" ry="80" fill="none" stroke="url(#ring2)" stroke-width="1.5" stroke-opacity="0.45"/>
+      <circle cx="745" cy="300" r="3" fill="#a78bfa" filter="url(#textGlow)"/>
+    </g>
+  </g>
+
+  <!-- Orbital ring 3 (counter-rotating) -->
+  <g transform="rotate(-14 500 300)">
+    <g>
+      <animateTransform attributeName="transform" type="rotate" from="0 500 300" to="360 500 300" dur="14s" repeatCount="indefinite"/>
+      <ellipse cx="500" cy="300" rx="185" ry="65" fill="none" stroke="url(#ring3)" stroke-width="1.5" stroke-opacity="0.5"/>
+      <circle cx="685" cy="300" r="3" fill="#38bdf8" filter="url(#textGlow)"/>
+    </g>
+  </g>
+
+  <!-- Orbiting particles -->
+  <g>
+    <circle r="2.5" fill="#67e8f9">
+      <animateMotion dur="9s" repeatCount="indefinite" path="M500,300 m300,0 a300,110 0 1,1 -600,0 a300,110 0 1,1 600,0"/>
+    </circle>
+  </g>
+  <g>
+    <circle r="2" fill="#c4b5fd">
+      <animateMotion dur="6s" repeatCount="indefinite" path="M500,300 m-245,0 a245,70 0 1,1 490,0 a245,70 0 1,1 -490,0"/>
+    </circle>
+  </g>
+  <g>
+    <circle r="2" fill="#93c5fd">
+      <animateMotion dur="12s" repeatCount="indefinite" path="M500,300 m185,0 a185,55 0 1,1 -370,0 a185,55 0 1,1 370,0"/>
+    </circle>
+  </g>
+
+  <!-- HUD brackets -->
+  <g stroke="#38bdf8" stroke-opacity="0.5" stroke-width="2" fill="none">
+    <path d="M360 180 H388 M360 180 V208"/>
+    <path d="M640 180 H612 M640 180 V208"/>
+    <path d="M360 420 H388 M360 420 V392"/>
+    <path d="M640 420 H612 M640 420 V392"/>
+  </g>
+
+  <!-- Core glow halo -->
+  <circle cx="500" cy="300" r="95" fill="url(#coreGlow)" filter="url(#blurWide)">
+    <animate attributeName="r" values="90;100;90" dur="4s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Core body -->
+  <circle cx="500" cy="300" r="62" fill="url(#coreBody)" filter="url(#blurSoft)">
+    <animate attributeName="r" values="60;64;60" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="500" cy="300" r="52" fill="url(#coreBody)">
+    <animate attributeName="r" values="50;54;50" dur="4s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Core center highlight -->
+  <circle cx="500" cy="290" r="20" fill="#f0fdff" opacity="0.85" filter="url(#blurSoft)">
+    <animate attributeName="opacity" values="0.85;0.5;0.85" dur="3s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Inner core ring -->
+  <circle cx="500" cy="300" r="30" fill="none" stroke="#67e8f9" stroke-opacity="0.6" stroke-width="1.5">
+    <animate attributeName="stroke-opacity" values="0.6;0.2;0.6" dur="2.5s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Waveform arcs -->
+  <g transform="translate(0, 0)">
+    <path d="M120 500 Q 200 470 280 500 T 440 500 T 600 500 T 760 500 T 920 500" fill="none" stroke="url(#wave)" stroke-width="3" filter="url(#blurSoft)">
+      <animate attributeName="d" dur="4s" repeatCount="indefinite"
+        values="M120 500 Q 200 470 280 500 T 440 500 T 600 500 T 760 500 T 920 500;
+                M120 500 Q 200 530 280 500 T 440 500 T 600 500 T 760 500 T 920 500;
+                M120 500 Q 200 470 280 500 T 440 500 T 600 500 T 760 500 T 920 500"/>
+    </path>
+  </g>
+  <path d="M140 525 Q 220 505 300 525 T 460 525 T 620 525 T 780 525 T 880 525" fill="none" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="2">
+    <animate attributeName="d" dur="3.5s" repeatCount="indefinite"
+      values="M140 525 Q 220 505 300 525 T 460 525 T 620 525 T 780 525 T 880 525;
+              M140 525 Q 220 545 300 525 T 460 525 T 620 525 T 780 525 T 880 525;
+              M140 525 Q 220 505 300 525 T 460 525 T 620 525 T 780 525 T 880 525"/>
+  </path>
+
+  <!-- Title -->
+  <text x="500" y="120" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="76" font-weight="800" letter-spacing="18" fill="url(#titleGrad)" filter="url(#textGlow)">JARVIS</text>
+  <text x="500" y="160" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" letter-spacing="8" fill="#7dd3fc" opacity="0.9">LOCAL AI VOICE ASSISTANT</text>
+
+  <!-- Tagline -->
+  <text x="500" y="580" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="20" letter-spacing="3" fill="#cbd5e1" opacity="0.85">Your computer · Your voice · Your private AI</text>
+
+  <!-- Footer line -->
+  <path d="M250 566 H750" stroke="#38bdf8" stroke-opacity="0.3" stroke-width="1"/>
+</svg>
