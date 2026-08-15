@@ -1,6 +1,5 @@
 """Test the Ollama client: availability check + one generation."""
 
-import config
 from ai.ollama import OllamaClient
 from utils import logger
 

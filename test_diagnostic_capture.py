@@ -38,7 +38,7 @@ def list_input_devices():
     di = sd.default.device[0]
     if isinstance(di, int):
         info = sd.query_devices(di)
-        print(f"\n=== CURRENT DEFAULT INPUT ===")
+        print("\n=== CURRENT DEFAULT INPUT ===")
         print(f"Name:        {info['name']}")
         print(f"Channels:    {info['max_input_channels']}")
         print(f"Sample rate: {info['default_samplerate']}")

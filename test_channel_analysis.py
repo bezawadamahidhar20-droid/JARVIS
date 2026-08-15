@@ -16,7 +16,6 @@ import sounddevice as sd
 
 import config
 from audio.vad import AdaptiveVAD
-from utils import logger
 
 FRAME_MS = config.FRAME_MS
 BLOCKSIZE = int(config.SAMPLE_RATE * FRAME_MS / 1000)

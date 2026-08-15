@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.wav
 voices/
+data/
+.ruff_cache/
+outputs/

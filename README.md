@@ -509,7 +509,11 @@ JARVIS/
 │   └── tts.py               # Piper TTS wrapper
 ├── utils/
 │   ├── __init__.py
+│   ├── dataset.py            # Real-conversation logger (ShareGPT JSONL for fine-tuning)
 │   └── logger.py            # Logging + per-stage timing helpers
+├── tools/
+│   ├── prepare_dataset.py    # Dedupe/filter raw logs → training JSON
+│   └── finetune_qwen3.ipynb  # Colab notebook: Unsloth QLoRA fine-tune → GGUF → Ollama
 ├── voices/                  # Piper ONNX voice files (git-ignored)
 ├── docs/
 │   ├── hero-core.svg        # Animated AI core (hero)
@@ -582,7 +586,46 @@ Honest caveats:
 - **Hardware-dependent performance.** Transcription and LLM speed scale with your CPU/RAM.
 - **Qwen3 has no live/current information.** Its knowledge is fixed at training time; questions about current events may be wrong or outdated unless an external data source is added later.
 - **Recognition degrades with noisy audio.** Background noise reduces Whisper accuracy and can confuse the VAD.
-- **Single-utterance turns.** No wake word, no interruption support, and no multi-turn conversation memory yet.
+- **Single-utterance turns.** No wake word or interruption support yet (conversation memory keeps the last 5 turns in context).
+
+---
+
+## 🧠 Fine-tuning JARVIS on Your Conversations
+
+JARVIS automatically logs every real user/assistant exchange to `data/conversations.jsonl` (ShareGPT format) while you talk to it. You can turn that data into a fine-tuned Qwen3 model so JARVIS answers more like *you*.
+
+### 1. Collect real data
+
+Just talk to JARVIS. Each completed exchange is appended to `data/conversations.jsonl` (ignored by git; `data/` is gitignored).
+
+### 2. Prepare the dataset
+
+```powershell
+python tools/prepare_dataset.py
+```
+
+This deduplicates, drops failed/error responses, and writes `data/dataset.json`. It warns if you have fewer than 20 usable pairs — keep talking to JARVIS.
+
+### 3. Train on a free GPU
+
+1. Open **`tools/finetune_qwen3.ipynb`** in [Google Colab](https://colab.research.google.com) (upload the notebook).
+2. Upload `data/dataset.json` to the Colab runtime.
+3. Runtime → Change runtime type → **T4 GPU**, then Runtime → **Run all**.
+4. The notebook uses **Unsloth + QLoRA** to fine-tune **Qwen3-8B** in non-thinking mode (matching `"think": False` in `config.py`), and exports a `q4_k_m` GGUF plus an Ollama `Modelfile`.
+
+### 4. Install into Ollama
+
+Download both files from Colab to your PC, then:
+
+```powershell
+ollama create qwen3:8b-jarvis -f Modelfile
+```
+
+Point JARVIS at it in `config.py`:
+
+```python
+OLLAMA_MODEL = "qwen3:8b-jarvis"
+```
 
 ---
 
@@ -596,7 +639,6 @@ Planned / future work (not yet implemented):
 - **Current-information tools** — a local source or opt-in connector for live data.
 - **More desktop commands** — broader app catalog and window control.
 - **Configurable personalities** — alternate system prompts/voices.
-- **Conversation memory** — multi-turn context across utterances.
 - **GUI** — visual status, device selection, and diagnostics.
 - **Richer diagnostics** — device/level graphs and capture reports.
 - **GPU acceleration** — optional CTranslate2 / Ollama GPU offload.

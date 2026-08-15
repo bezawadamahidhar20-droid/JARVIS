@@ -91,10 +91,10 @@ def main():
         row["base"] = (time_base, text_base)
         results.append(row)
 
-        print(f"tiny.en:")
+        print("tiny.en:")
         print(f"Time: {time_tiny:.2f} sec")
         print(f"Text: {text_tiny or '(empty)'}\n")
-        print(f"base:")
+        print("base:")
         print(f"Time: {time_base:.2f} sec")
         print(f"Text: {text_base or '(empty)'}")
         print("----------------------------------------\n")

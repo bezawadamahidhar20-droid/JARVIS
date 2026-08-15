@@ -85,7 +85,6 @@ def main():
         dt = time.perf_counter() - start
         print(f"{name}: {dt:.2f} sec -> {text or '(empty)'}")
 
-    matches = {n: None for n in ("tiny.en", "base")}
     results = {}
     for name, eng in (("tiny.en", tiny), ("base", base)):
         start = time.perf_counter()

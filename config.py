@@ -44,3 +44,6 @@ SYSTEM_PROMPT = (
     "Give direct answers; avoid long explanations unless the user "
     "explicitly asks for detail."
 )
+
+# ---- Conversation dataset (fine-tuning) ----
+DATASET_PATH = "data/conversations.jsonl"  # raw ShareGPT-format log of real turns

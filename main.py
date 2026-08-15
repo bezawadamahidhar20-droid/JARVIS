@@ -19,7 +19,7 @@ from audio.microphone import SpeechRecorder
 from commands.router import CommandRouter
 from speech.tts import TTSEngine
 from speech.whisper import WhisperEngine
-from utils import logger
+from utils import dataset, logger
 
 EXIT_PHRASES = ("exit", "quit", "goodbye", "stop", "stop jarvis", "shut down jarvis")
 
@@ -89,6 +89,11 @@ def main():
 
     router = CommandRouter()
     logger.ok("Command router ready")
+
+    dataset_logger = dataset.ConversationDataset(
+        path=config.DATASET_PATH,
+        system_prompt=config.SYSTEM_PROMPT,
+    )
 
     tts = TTSEngine()
     try:
@@ -183,6 +188,8 @@ def main():
         tts.speak(response)
         # Remember the exchange so the LLM has context across turns.
         ollama.add_turn(text, response)
+        # Collect real data for a future fine-tune.
+        dataset_logger.record(text, response)
         logger.report("TOTAL", turn_start)
         print()
         mic_cooldown()
