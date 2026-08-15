@@ -1,29 +1,15 @@
-# JARVIS — pinned runtime dependencies
-# Python 3.10+  |  Windows x64 (primary), Linux/macOS (diagnostics)
+# JARVIS — runtime dependencies
+# Python 3.10+  |  Windows (primary)
 #
 # Install:  pip install -r requirements.txt
-# Setup  :  .\setup.ps1   (Windows)   |   bash setup.sh   (Linux/macOS/WSL)
-#
-# Version rationale
-# ─────────────────
-# sounddevice 0.5.5   — latest stable; ships bundled PortAudio for Windows
-# numpy 2.2.3         — latest stable; required by sounddevice & faster-whisper
-# faster-whisper 1.1.1— latest stable supporting Python 3.9+; pins ctranslate2≥4
-# piper-tts 1.2.0     — latest stable GPL release; ONNX neural TTS
-# requests 2.32.3     — latest stable; Ollama /api/generate HTTP client
-# scipy 1.14.1        — diagnostic/test scripts only (not imported by main pipeline)
-# ollama 0.6.2        — official Python SDK; test_qwen.py only
 
-# ── Core runtime ──────────────────────────────────────────────────────────────
-sounddevice==0.5.5
-numpy==2.2.3
-faster-whisper==1.1.1
-piper-tts==1.2.0
-requests==2.32.3
-rich==15.0.0
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+requests>=2.31.0
+python-dotenv>=1.0.0
+pyautogui>=0.9.54
+pillow>=10.0.0
 
-# ── Diagnostic / test scripts only ───────────────────────────────────────────
-# (not imported anywhere in the main pipeline: main.py, ai/, audio/, commands/,
-#  speech/, utils/ — safe to omit if you only want the assistant itself)
-scipy==1.14.1
-ollama==0.6.2
+# Used as the microphone audio backend when PyAudio has no wheel for your
+# Python version (common on 3.13+ Windows). Ships its own PortAudio DLLs.
+sounddevice>=0.5.0

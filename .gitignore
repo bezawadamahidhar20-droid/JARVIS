@@ -6,3 +6,6 @@ voices/
 data/
 .ruff_cache/
 outputs/
+
+# Secrets — never commit your .env file.
+.env

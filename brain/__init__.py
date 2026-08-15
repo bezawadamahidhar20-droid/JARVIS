@@ -1,0 +1,1 @@
+"""The AI brain: conversation memory, the Ollama/Qwen3 client, and routing."""

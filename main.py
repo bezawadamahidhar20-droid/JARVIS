@@ -1,276 +1,190 @@
-"""JARVIS — hands-free local voice assistant main loop.
+"""JARVIS — voice assistant main loop.
 
-Pipeline: VAD capture -> Faster-Whisper -> command router / Qwen3 -> Piper TTS
+Pipeline:  microphone → speech-to-text → intent router → local command
+           OR Qwen3 (Ollama) → text-to-speech
 
-Design notes
-------------
-* Exit detection lives **only** here, in ``is_exit_phrase()``.  The command
-  router (``commands/router.py``) deliberately has no exit logic, so sentences
-  that contain the words "exit" or "quit" mid-phrase ("what is an exit code?",
-  "how do I quit vim?") are safely forwarded to the LLM instead of shutting
-  JARVIS down.
-
-* The post-TTS microphone cooldown (``mic_cooldown()``) pauses after
-  ``tts.speak()`` returns so the speaker tail / room reverb has time to decay
-  before the VAD re-arms.  Without this hold-off the VAD can pick up JARVIS's
-  own voice and feed it back into Whisper as phantom speech.
+Modes
+-----
+* Voice (default): listens through the microphone.
+* ``--text``      : type your input instead — perfect for testing, CI or
+                    machines without a microphone.
 """
 
-import re
-import time
-
-import sounddevice as sd
+import argparse
+import sys
 
 import config
-from ai.ollama import (
+from brain.memory import ConversationMemory
+from brain.ollama_client import (
     ModelMissingError,
     OllamaClient,
     OllamaResponseError,
     OllamaUnavailableError,
 )
-from audio.microphone import SpeechRecorder
-from commands.router import CommandRouter
-from speech.tts import TTSEngine
-from speech.whisper import WhisperEngine
-from utils import dataset, logger
-from utils.terminal_ui import TerminalUI
+from brain.router import AI_QUESTION, CLEAR_MEMORY, COMMAND, EXIT, IntentRouter
+from commands.registry import CommandRegistry
+from engine.microphone import MicrophoneManager
+from engine.stt import STTEngine
+from engine.tts import TTSEngine
+from utils import logger
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-# Closed allow-list of whole-utterance exit phrases.
-# Words like "exit" or "quit" must match the ENTIRE normalised utterance to
-# trigger shutdown — not just appear somewhere inside a longer sentence.
-EXIT_PHRASES: frozenset[str] = frozenset({
-    "exit",
-    "quit",
-    "goodbye",
-    "stop",
-    "stop jarvis",
-    "shut down jarvis",
-})
+BANNER: str = (
+    "=============================================\n"
+    "              JARVIS ONLINE\n"
+    "============================================="
+)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+class JARVIS:
+    """Wires every component together and runs the conversation loop."""
 
-def _words(text: str) -> str:
-    """Normalise *text* to lowercase letters and spaces only."""
-    return " ".join(re.sub(r"[^a-z ]", "", text.strip().lower()).split())
+    def __init__(self, text_mode: bool = False) -> None:
+        self.text_mode = text_mode
 
+        # Brain
+        self.memory = ConversationMemory()
+        self.ollama = OllamaClient()
+        self.router = IntentRouter()
 
-def is_exit_phrase(text: str) -> bool:
-    """Return ``True`` only when the *entire* utterance is an exit phrase.
+        # Commands
+        self.commands = CommandRegistry()
 
-    This guards against false shutdowns from sentences that merely contain
-    words like "exit" or "quit":
-        "what is an exit code?"   → False  (forwarded to LLM)
-        "how do I quit vim?"      → False  (forwarded to LLM)
-        "goodbye"                 → True   (shuts down)
-        "exit"                    → True   (shuts down)
-    """
-    return _words(text) in EXIT_PHRASES
+        # Audio
+        self.tts = TTSEngine(rate=config.TTS_RATE)
+        self.mic = MicrophoneManager()
+        self.stt = STTEngine(
+            self.mic,
+            language=config.STT_LANGUAGE,
+            timeout=config.STT_TIMEOUT,
+        )
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-def is_meaningful(text: str) -> bool:
-    """Reject noise transcriptions without blocking short commands.
+    def speak(self, text: str) -> None:
+        """Speak and print *text* (TTS degrades gracefully to print-only)."""
+        self.tts.speak(text)
 
-    A transcription must have at least 2 characters total and at least 2
-    alphabetic characters to be considered real speech.
-    """
-    t = text.strip()
-    return len(t) >= 2 and sum(c.isalpha() for c in t) >= 2
+    def _get_input(self) -> str | None:
+        """Return one utterance from voice or text mode (None = nothing heard)."""
+        if self.text_mode:
+            try:
+                return input("You: ").strip()
+            except EOFError:
+                return None
+        return self.stt.listen()
 
-
-def mic_cooldown(seconds: float = config.POST_TTS_COOLDOWN_S) -> None:
-    """Pause after TTS playback before the mic re-arms.
-
-    After ``sd.wait()`` returns in ``TTSEngine.speak()`` the speaker cone is
-    still moving and the room reverb tail has not decayed.  This hold-off
-    prevents the VAD from picking up JARVIS's own voice on the next loop
-    iteration and feeding it into Whisper as a phantom utterance.
-
-    Set ``POST_TTS_COOLDOWN_S = 0`` in ``config.py`` for headphone-only use
-    or when echo cancellation is handled externally.
-    """
-    if seconds > 0:
-        time.sleep(seconds)
-
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    ui = TerminalUI(debug=config.DEBUG)
-    logger.set_sink(ui.log_sink)
-    ui.start()
-
-    try:
-        # ── Microphone availability ───────────────────────────────────────────
+    def _answer_with_ai(self, text: str) -> str:
+        """Send *text* to Qwen3 with full memory context; never raises."""
         try:
-            sd.query_devices(kind="input")
-        except Exception as exc:
-            logger.error(f"Microphone unavailable: {exc}")
-            ui.set_component("Microphone", "error", "missing")
-            return
-
-        # ── Whisper ───────────────────────────────────────────────────────────
-        try:
-            whisper = WhisperEngine(
-                model_size=config.WHISPER_MODEL,
-                device=config.WHISPER_DEVICE,
-                compute_type=config.WHISPER_COMPUTE_TYPE,
-                language=config.WHISPER_LANGUAGE,
-                beam_size=config.WHISPER_BEAM_SIZE,
-            )
-            ui.set_component("Whisper", "ok", config.WHISPER_MODEL)
-        except Exception as exc:
-            logger.error(f"Whisper failed to load: {exc}")
-            ui.set_component("Whisper", "error", "load failed")
-            return
-
-        # ── Ollama (non-fatal if down — local commands still work) ────────────
-        ollama = OllamaClient()
-        try:
-            ollama.check_available()
-            ui.set_component("Ollama", "ok", config.OLLAMA_MODEL)
+            self.memory.add_user_message(text)
+            response = self.ollama.ask(text, self.memory)
+            self.memory.add_assistant_message(response)
+            return response
         except (OllamaUnavailableError, ModelMissingError, OllamaResponseError) as exc:
             logger.error(str(exc))
-            logger.warning("Conversational questions will not work until Ollama is fixed.")
-            ui.set_component("Ollama", "error", "unavailable")
-
-        # ── Command router ────────────────────────────────────────────────────
-        router = CommandRouter()
-        logger.ok("Command router ready")
-        ui.set_component("Router", "ok")
-
-        # ── Conversation dataset (fine-tuning) ────────────────────────────────
-        dataset_logger = dataset.ConversationDataset(
-            path=config.DATASET_PATH,
-            system_prompt=config.SYSTEM_PROMPT,
-        )
-
-        # ── TTS ───────────────────────────────────────────────────────────────
-        tts = TTSEngine()
-        try:
-            tts.initialize()
-            ui.set_component("TTS", "ok")
+            return (
+                "My AI brain is offline right now — I can't reach the local "
+                "Ollama model. Please start Ollama and I'll be back to normal."
+            )
         except Exception as exc:
-            logger.error(f"TTS unavailable: {exc}")
-            ui.set_component("TTS", "error", "unavailable")
+            logger.error(f"Unexpected AI failure: {exc}")
+            return "Sorry, something went wrong on my end."
 
-        # ── Microphone recorder ───────────────────────────────────────────────
-        recorder = SpeechRecorder(
-            sample_rate=config.SAMPLE_RATE,
-            channels=config.CHANNELS,
-            input_device=config.INPUT_DEVICE,
-            frame_ms=config.FRAME_MS,
-            min_speech_ms=config.MIN_SPEECH_MS,
-            silence_ms=config.SILENCE_MS,
-            max_record_ms=config.MAX_RECORD_MS,
-            calibration_ms=config.CALIBRATION_MS,
-            flush_ms=config.STREAM_FLUSH_MS,
-            initial_threshold=config.INITIAL_RMS_THRESHOLD,
-            multiplier=config.NOISE_MULTIPLIER,
-            alpha=config.NOISE_EMA_ALPHA,
+    def _greeting(self) -> str:
+        return (
+            f"Good day, {config.JARVIS_OWNER}. I am JARVIS, at your service. "
+            "How can I help you today?"
         )
-        ui.set_recorder(recorder)
-        ui.set_component("Microphone", "ok", recorder.display_name())
 
-        # ── Main loop ─────────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        print(BANNER)
+        logger.ok(f"Model: {config.OLLAMA_MODEL}")
+
+        if not self.ollama.is_available():
+            logger.warning(
+                "Ollama is not running — general questions won't work until "
+                "you start it (commands like time and open still will)."
+            )
+
+        if self.text_mode:
+            logger.status("Text mode — type your question and press Enter.")
+        else:
+            if not self.mic.is_available():
+                logger.error(
+                    "No microphone found. Run with --text to type instead."
+                )
+                return
+            self.stt.calibrate()
+            logger.status("JARVIS is listening...")
+
+        # Startup greeting.
+        self.speak(self._greeting())
+        print()
+
         while True:
-            turn_start: float = logger.tick()
-            ui.set_state("listening")
-
-            # 1. Capture utterance via VAD-gated streaming mic.
             try:
-                audio = recorder.capture_speech()
-            except sd.PortAudioError as exc:
-                logger.error(f"Microphone error: {exc}")
-                logger.error("Shutting down — restart JARVIS after fixing the microphone.")
-                return
-            logger.report("CAPTURE", turn_start)
-            logger.info("[VOICE] Speech detected")
+                text = self._get_input()
+            except KeyboardInterrupt:
+                self.speak("Goodbye.")
+                break
 
-            if len(audio) == 0:
-                logger.warning("No speech detected")
+            if text is None:
+                # Voice: silence/timeout → keep listening.
+                # Text: EOF (stdin closed) → end the session.
+                if self.text_mode:
+                    break
+                continue
+            if not text.strip():
                 continue
 
-            # 2. Transcribe with Faster-Whisper.
-            ui.set_state("thinking", "Whisper transcribing…")
-            w_start: float = logger.tick()
-            try:
-                text: str = whisper.transcribe(audio)
-            except Exception as exc:
-                logger.error(f"Whisper failed: {exc}")
-                continue
-            logger.report("WHISPER", w_start)
+            text = text.strip()
+            print(f"[You] {text}")
 
-            ui.add_message("user", text)
+            intent, text = self.router.route(text)
 
-            # 3. Noise filter.
-            if not is_meaningful(text):
-                logger.warning("No speech detected")
+            if intent == EXIT:
+                self.speak("Goodbye. See you soon.")
+                break
+
+            if intent == CLEAR_MEMORY:
+                self.memory.clear()
+                self.speak("I've cleared our conversation memory.")
                 continue
 
-            # 4. Exit check — whole-utterance match only.
-            #    Words like "exit" or "quit" inside a normal sentence never match
-            #    because is_exit_phrase() compares the FULL normalised string.
-            if is_exit_phrase(text):
-                ui.set_state("speaking", "Saying goodbye…")
-                tts.speak("Goodbye.")
-                ui.add_message("jarvis", "Goodbye.")
-                return
-
-            # 5. Deterministic command routing.
-            r_start: float = logger.tick()
-            command, _ = router.route(text)
-            logger.report("ROUTER", r_start)
-
-            # 6. Execute command or ask Qwen3.
-            response: str
-            if command is not None:
-                logger.info(f"[COMMAND] {command}")
-                ui.add_message("command", command)
+            if intent == COMMAND:
                 try:
-                    response = router.execute(command)
+                    response = self.commands.execute(text)
                 except Exception as exc:
                     logger.error(f"Command execution failed: {exc}")
-                    response = "Sorry, I could not complete that command."
-            else:
-                ui.set_state("thinking", "Qwen3 generating…")
-                try:
-                    o_start: float = logger.tick()
-                    response = ollama.generate(text)
-                    logger.report("OLLAMA", o_start)
-                    ui.add_message("ai", config.OLLAMA_MODEL)
-                except OllamaUnavailableError as exc:
-                    logger.error(str(exc))
-                    response = "Ollama is not running, so I cannot answer that right now."
-                except ModelMissingError as exc:
-                    logger.error(str(exc))
-                    response = "The Qwen model is not installed on this Ollama."
-                except OllamaResponseError as exc:
-                    logger.error(str(exc))
-                    response = "Ollama returned an error while answering."
-                except Exception as exc:
-                    logger.error(f"Ollama failed: {exc}")
-                    response = "Sorry, something went wrong on my end."
+                    response = "Sorry, I couldn't complete that command."
+            else:  # AI_QUESTION — the default for anything unmatched
+                response = self._answer_with_ai(text)
 
-            # 7. Speak and record the exchange for multi-turn context.
-            ui.set_state("speaking", "JARVIS responding…")
-            ui.add_message("jarvis", response)
-            tts.speak(response)
-            ollama.add_turn(text, response)
-            # Collect real data for a future fine-tune.
-            dataset_logger.record(text, response)
-            logger.report("TOTAL", turn_start)
+            self.speak(response)
+            print()
 
-            # 8. Post-TTS hold-off: let the speaker tail decay before re-arming.
-            mic_cooldown()
-    finally:
-        ui.stop()
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="JARVIS — local AI voice assistant")
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Run in text mode (type input instead of using the microphone).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    assistant = JARVIS(text_mode=args.text)
+    try:
+        assistant.run()
+    except KeyboardInterrupt:
+        print()
+        logger.status("JARVIS stopped.")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.status("JARVIS stopped.")
+    sys.exit(main())

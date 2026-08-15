@@ -49,7 +49,7 @@ def _env_float(key: str, default: float) -> float:
 # ── Ollama / Qwen3 ────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL: str = _env_str("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = _env_str("OLLAMA_MODEL", "qwen3:8b")
-OLLAMA_TIMEOUT: int = _env_int("OLLAMA_TIMEOUT", 60)          # seconds per request
+OLLAMA_TIMEOUT: int = _env_int("OLLAMA_TIMEOUT", 120)         # seconds per request
 OLLAMA_TEMPERATURE: float = _env_float("OLLAMA_TEMPERATURE", 0.7)
 
 # ── Speech-to-text ────────────────────────────────────────────────────────────
