@@ -1,72 +1,145 @@
-"""Rolling conversation memory for JARVIS.
+"""
+brain/memory.py — Conversation memory for JARVIS
+Maintains rolling window of conversation turns so
+follow-up questions work correctly.
 
-WHY THIS EXISTS
----------------
-Ollama is stateless per request: without memory, the follow-up question
-"who is Elon Musk?" -> "what does he own?" fails because "he" has nothing
-to point at. This class keeps the conversation as a list of OpenAI-style
-message dicts and hands the WHOLE window to Ollama on every call.
-
-The window is bounded: once ``max_turns`` full user+assistant pairs are
-stored, the oldest pair is dropped first (FIFO) so prompt size stays
-predictable no matter how long the session runs.
+Example:
+    User: "Who is Elon Musk?"
+    User: "What companies does he own?"
+    JARVIS knows "he" = Elon Musk from history.
 """
 
-import config
+from typing import List, Dict
+from utils.logger import get_logger
+
+logger = get_logger("memory")
+
+# Message type
+Message = Dict[str, str]
 
 
 class ConversationMemory:
-    """In-memory, rolling conversation history."""
+    """
+    Stores conversation as a list of message dicts.
+    Sends full history to Ollama on every request
+    so follow-up questions work correctly.
+    """
 
-    def __init__(self, max_turns: int = config.MEMORY_MAX_TURNS) -> None:
-        self.max_turns: int = max_turns
-        # List of {"role": "user"|"assistant", "content": str}.
-        self._messages: list[dict[str, str]] = []
+    def __init__(self, max_turns: int = 6, max_chars: int = 3000):
+        """
+        Args:
+            max_turns: Max number of user+assistant pairs to keep.
+                       Older turns dropped when limit exceeded.
+            max_chars: Max total characters of history sent to the
+                       model per request. Older turns dropped (in
+                       pairs) when the total exceeds this.
+        """
+        # Import here to avoid circular import issues
+        try:
+            from config import jarvis_config
+            self.max_turns = jarvis_config.MEMORY_MAX_TURNS
+            self.max_chars = jarvis_config.MEMORY_MAX_CHARS
+        except Exception:
+            self.max_turns = max_turns
+            self.max_chars = max_chars
+
+        self._messages: List[Message] = []
+        logger.info(
+            f"Memory initialized (max {self.max_turns} turns, "
+            f"{self.max_chars} chars)."
+        )
 
     def add_user_message(self, content: str) -> None:
-        """Record what the user said (empty/whitespace input is ignored)."""
-        text = (content or "").strip()
-        if text:
-            self._messages.append({"role": "user", "content": text})
+        """Add a user message to history."""
+        if not content or not content.strip():
+            return
+        self._messages.append({
+            "role": "user",
+            "content": content.strip()
+        })
+        self._enforce_limit()
 
     def add_assistant_message(self, content: str) -> None:
-        """Record JARVIS's reply, then trim the window to the max turns."""
-        text = (content or "").strip()
-        if text:
-            self._messages.append({"role": "assistant", "content": text})
-            self._trim()
-
-    def _trim(self) -> None:
-        """Drop the oldest full turns once ``max_turns`` pairs are exceeded.
-
-        A "turn" is a user message followed by its assistant reply. We trim
-        only after an assistant message is added, so the history is always
-        well-formed here (alternating user/assistant, starting with user).
-        """
-        if self.max_turns <= 0:
+        """Add an assistant (JARVIS) response to history."""
+        if not content or not content.strip():
             return
-        user_count = sum(1 for m in self._messages if m["role"] == "user")
-        while user_count > self.max_turns:
-            # Locate the oldest user message and delete it together with the
-            # following message (its assistant reply).
-            for i, message in enumerate(self._messages):
-                if message["role"] == "user":
-                    del self._messages[i : i + 2]
-                    break
-            user_count -= 1
+        self._messages.append({
+            "role": "assistant",
+            "content": content.strip()
+        })
+        self._enforce_limit()
 
-    def get_context_for_ollama(self, system_prompt: str) -> list[dict[str, str]]:
-        """Return the full messages list, with the system prompt first.
+    def get_history(self) -> List[Message]:
+        """Return full conversation history."""
+        return list(self._messages)
 
-        This is what gets POSTed to Ollama's ``/api/chat`` endpoint, so the
-        model always sees the current prompt plus all recent context.
+    def get_context_for_ollama(
+        self, system_prompt: str
+    ) -> List[Message]:
         """
-        return [{"role": "system", "content": system_prompt}] + list(self._messages)
+        Build full message list for Ollama.
+        Format: [system, user, assistant, user, assistant, ...]
+
+        Delegate to get_trimmed_context() so every caller gets the
+        character-trimmed history automatically.
+        """
+        return self.get_trimmed_context(system_prompt)
+
+    def get_trimmed_context(
+        self, system_prompt: str
+    ) -> List[Message]:
+        """
+        Build the message list for Ollama, dropping the oldest turns
+        (in pairs) when the total character count exceeds max_chars.
+
+        Returns a new list, so callers can safely modify it (e.g.
+        appending the current user message).
+        """
+        messages: List[Message] = [
+            {"role": "system", "content": system_prompt}
+        ]
+        messages.extend(self._messages)
+
+        if self.max_chars > 0:
+            total = sum(len(m["content"]) for m in messages)
+            # Never drop the system message or the last (current) turn.
+            while total > self.max_chars and len(messages) > 3:
+                removed = messages.pop(1)          # oldest user message
+                total -= len(removed["content"])
+                if len(messages) > 2 and messages[1]["role"] == "assistant":
+                    removed = messages.pop(1)      # its assistant reply
+                    total -= len(removed["content"])
+                logger.debug(
+                    "Dropped oldest turn from trimmed context."
+                )
+
+        return messages
 
     def clear(self) -> None:
-        """Forget everything (used by the "clear memory" command)."""
+        """Clear all conversation history."""
         self._messages.clear()
+        logger.info("Conversation memory cleared.")
+
+    def _enforce_limit(self) -> None:
+        """
+        Remove oldest turn when memory exceeds max_turns.
+        Always removes in pairs (user + assistant) to keep
+        history coherent.
+        """
+        max_messages = self.max_turns * 2
+        while len(self._messages) > max_messages:
+            # Remove oldest pair
+            self._messages.pop(0)
+            if self._messages:
+                self._messages.pop(0)
+            logger.debug("Dropped oldest turn from memory.")
 
     def __len__(self) -> int:
-        """Number of stored messages (for tests / diagnostics)."""
         return len(self._messages)
+
+    def __repr__(self) -> str:
+        turns = len(self._messages) // 2
+        return (
+            f"ConversationMemory("
+            f"turns={turns}, max={self.max_turns})"
+        )

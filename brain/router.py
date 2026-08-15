@@ -1,104 +1,207 @@
-"""Intent router — decides whether an utterance is a command or a question.
+"""
+brain/router.py — Intent Router
 
-CRITICAL RULE
--------------
-Everything that is NOT explicitly recognised as a command falls through to
-``AI_QUESTION``. This is the single fix that makes general questions work:
-"What is Python?", "Who are you?", "Tell me a joke" etc. are all routed to
-Qwen3 instead of hitting a dead "I don't understand" branch.
+Decides whether user input is:
+  1. A system COMMAND  (open app, time, date, screenshot)
+  2. An AI QUESTION    (route to Qwen3 via Ollama)
+  3. EXIT              (shut down JARVIS)
+  4. CLEAR_MEMORY      (reset conversation context)
+  5. FAST_RESPONSE     (instant canned reply to a greeting)
 
-Intent types
-------------
-* ``COMMAND``      — local action (open app/website, time/date, screenshot)
-* ``AI_QUESTION``  — send to the LLM (the default)
-* ``EXIT``         — goodbye, shut down
-* ``CLEAR_MEMORY`` — forget the conversation
+CRITICAL RULE:
+Anything that is NOT matched as a command becomes an
+AI_QUESTION. This is the fix that makes JARVIS actually
+answer normal questions instead of saying
+"I don't understand".
 """
 
 import re
+from typing import Tuple, List, Pattern
+from utils.logger import get_logger
 
-from commands.time_commands import DATE_RE, TIME_RE
+logger = get_logger("router")
 
-# ── Intent constants ──────────────────────────────────────────────────────────
 
-COMMAND = "COMMAND"
-AI_QUESTION = "AI_QUESTION"
-EXIT = "EXIT"
-CLEAR_MEMORY = "CLEAR_MEMORY"
+class Intent:
+    """Intent type constants."""
+    COMMAND = "command"
+    AI_QUESTION = "ai_question"
+    CLEAR_MEMORY = "clear_memory"
+    EXIT = "exit"
+    FAST_RESPONSE = "fast_response"
+    UNKNOWN = "unknown"
 
-# ── Patterns (pre-compiled once for speed) ────────────────────────────────────
 
-# A leading question word turns "how do I open chrome?" into a question for
-# the AI instead of a command — the user is ASKING, not ordering.
-_QUESTION_WORD_RE = re.compile(
-    r"^(how|what|why|when|where|which|who|whom|whose|can you|could you|"
-    r"do you|are you|is it|should i|tell me how|how do i)\b",
-    re.IGNORECASE,
-)
+# ── Fast responses ────────────────────────────────────────────
+# Greetings answered instantly from this local table instead of
+# a full AI round-trip. Keys are normalized (lowercase, no punctuation).
+try:
+    from config import jarvis_config
+    OWNER = jarvis_config.OWNER
+    ENABLE_FAST_RESPONSES = jarvis_config.ENABLE_FAST_RESPONSES
+except Exception:
+    OWNER = "Sir"
+    ENABLE_FAST_RESPONSES = True
 
-# exit/quit/goodbye as the ENTIRE utterance (avoid "what is an exit code?").
-# "Goodbye JARVIS" / "Goodbye sir" are also accepted since users say them
-# naturally; the key guard is that "exit"/"quit"/"stop" alone only fire when
-# they are the whole utterance, never inside a real question.
-_EXIT_RE = re.compile(
-    r"^\s*(?:exit|quit|goodbye|good bye|bye|stop)\s*$"
-    r"|^\s*(?:goodbye|good bye|bye)\s+(?:jarvis|sir)?\s*$"
-    r"|^\s*stop\s+jarvis\s*$",
-    re.IGNORECASE,
-)
+_FAST_TEMPLATES: dict = {
+    "hello": "Hello, {owner}. How can I help you today?",
+    "hello jarvis": "Hello, {owner}. At your service.",
+    "hello there": "Hello, {owner}. At your service.",
+    "hi": "Hi there, {owner}.",
+    "hi jarvis": "Hi, {owner}. How may I assist you?",
+    "hey": "Hey, {owner}.",
+    "hey jarvis": "Hey, {owner}. Ready when you are.",
+    "good morning": "Good morning, {owner}.",
+    "good afternoon": "Good afternoon, {owner}.",
+    "good evening": "Good evening, {owner}.",
+    "good night": "Good night, {owner}. I'll be here if you need me.",
+    "thanks": "You're welcome, {owner}.",
+    "thank you": "You're welcome, {owner}.",
+    "thanks jarvis": "You're welcome, {owner}.",
+    "thank you jarvis": "You're welcome, {owner}.",
+    "how are you": "I'm running at full capacity, {owner}. How can I help?",
+    "how are you doing": "All systems nominal, {owner}.",
+    "how is it going": "All systems nominal, {owner}.",
+    "hows it going": "All systems nominal, {owner}.",
+    "whats up": "Just monitoring the house, {owner}. How can I help?",
+    "who are you": "I am JARVIS, your personal AI assistant, {owner}.",
+    "who are you jarvis": "I am JARVIS, your personal AI assistant, {owner}.",
+    "what is your name": "I am JARVIS, at your service, {owner}.",
+    "are you jarvis": "Yes, {owner}. I am JARVIS.",
+}
 
-_CLEAR_RE = re.compile(r"\b(clear|reset|forget)\s+(the\s+)?(memory|history|conversation)\b", re.IGNORECASE)
 
-_SCREENSHOT_RE = re.compile(r"\b(take\s+(a\s+)?screenshot|screenshot)\b", re.IGNORECASE)
+def _normalize_key(text: str) -> str:
+    """Normalize a phrase for dictionary lookup."""
+    text = re.sub(r"[^a-z0-9 ]", "", (text or "").lower())
+    return re.sub(r"\s+", " ", text).strip()
 
-# open/launch/start/go to/visit <something>
-_OPEN_RE = re.compile(
-    r"\b(?:open|launch|start|go\s+to|visit)\s+(?:the\s+)?(.+?)\s*$",
-    re.IGNORECASE,
-)
+
+FAST_RESPONSES: dict = {
+    key: reply.format(owner=OWNER)
+    for key, reply in _FAST_TEMPLATES.items()
+}
 
 
 class IntentRouter:
-    """Maps raw text to an ``(intent, text)`` tuple."""
+    """
+    Routes user input to the correct handler.
+    Defaults to AI so no question ever goes unanswered.
+    """
 
-    def __init__(self) -> None:
-        # Keep references to the compiled patterns so they are compiled
-        # exactly once and re-used on every route() call.
-        self._question_word = _QUESTION_WORD_RE
-        self._exit = _EXIT_RE
-        self._clear = _CLEAR_RE
-        self._screenshot = _SCREENSHOT_RE
-        self._open = _OPEN_RE
-        self._time = TIME_RE
-        self._date = DATE_RE
+    # ── Exit phrases ──────────────────────────────────────────
+    EXIT_PATTERNS: List[str] = [
+        r'\b(exit|quit|goodbye|good bye|bye jarvis|'
+        r'shut ?down jarvis|stop jarvis|terminate)\b',
+        r'^\s*bye\s*$',
+    ]
 
-    def route(self, text: str) -> tuple[str, str]:
-        """Return ``(intent, text)`` for the given utterance."""
-        t = (text or "").strip()
-        if not t:
-            return AI_QUESTION, t
+    # ── Memory clear phrases ──────────────────────────────────
+    MEMORY_PATTERNS: List[str] = [
+        r'\b(clear|reset|wipe|erase)\s+'
+        r'(the\s+)?(memory|history|context|conversation)\b',
+        r'\bforget\s+(everything|all|our conversation)\b',
+        r'\bstart\s+(over|fresh|a new conversation)\b',
+    ]
 
-        # 1. Explicit "goodbye" — full-utterance match only.
-        if self._exit.match(t):
-            return EXIT, t
+    # ── System command phrases ────────────────────────────────
+    # Keep this list tight. When in doubt let the AI handle it.
+    COMMAND_PATTERNS: List[str] = [
+        # Launch desktop applications
+        r'\b(open|launch|start|run)\s+'
+        r'(chrome|firefox|edge|browser|notepad|calculator|'
+        r'calc|paint|word|excel|powerpoint|vlc|spotify|'
+        r'discord|whatsapp|telegram|steam|file explorer|'
+        r'explorer|task manager|command prompt|cmd|'
+        r'powershell|terminal|settings)\b',
 
-        # 2. Conversation hygiene commands.
-        if self._clear.search(t):
-            return CLEAR_MEMORY, t
+        # Open websites
+        r'\b(open|go to|visit|navigate to|launch)\s+'
+        r'(youtube|google|github|stack ?overflow|reddit|'
+        r'twitter|instagram|facebook|linkedin|netflix|'
+        r'amazon|gmail|chatgpt)\b',
 
-        # 3. Clock / calendar (specific phrases, checked BEFORE the generic
-        #    question-word guard so "what time is it?" still becomes COMMAND).
-        if self._time.search(t) or self._date.search(t):
-            return COMMAND, t
+        # Time and date (read from system clock, not AI)
+        r'\bwhat(?:\'s| is)?\s+(the\s+)?'
+        r'(current\s+)?(time|date)\b',
+        r'\btell me the (time|date)\b',
+        r'\bwhat day is (it|today)\b',
+        r'\btoday\'?s date\b',
 
-        # 4. Screenshots.
-        if self._screenshot.search(t):
-            return COMMAND, t
+        # Screenshot
+        r'\b(take a |take )?screenshot\b',
 
-        # 5. open/launch/go to <target>. Guarded so that sentences that merely
-        #    START like a question ("how do I open chrome?") go to the AI.
-        if not self._question_word.match(t) and self._open.search(t):
-            return COMMAND, t
+        # Media and volume control
+        r'\b(volume (up|down|mute|unmute))\b',
+        r'\b(increase|decrease|set)\s+(volume|brightness)\b',
+        r'\b(play|pause|next track|previous track)\b',
 
-        # 6. DEFAULT: everything else is a question for the AI.
-        return AI_QUESTION, t
+        # System power
+        r'\b(shut ?down|restart|reboot|sleep|lock)\s+'
+        r'(the\s+)?(computer|pc|system|laptop|machine)\b',
+        r'\b(abort|cancel)\s+shut ?down\b',
+    ]
+
+    def __init__(self):
+        self._exit_re: List[Pattern] = [
+            re.compile(p, re.IGNORECASE)
+            for p in self.EXIT_PATTERNS
+        ]
+        self._memory_re: List[Pattern] = [
+            re.compile(p, re.IGNORECASE)
+            for p in self.MEMORY_PATTERNS
+        ]
+        self._command_re: List[Pattern] = [
+            re.compile(p, re.IGNORECASE)
+            for p in self.COMMAND_PATTERNS
+        ]
+        logger.info("Intent router initialized.")
+
+    def route(self, user_input: str) -> Tuple[str, str]:
+        """
+        Classify user input.
+
+        Args:
+            user_input: Raw text from STT or keyboard
+
+        Returns:
+            (intent, cleaned_text)
+        """
+        if not user_input or not user_input.strip():
+            return Intent.UNKNOWN, ""
+
+        text = user_input.strip().lower()
+
+        # 1 — Exit has highest priority
+        if self._matches(text, self._exit_re):
+            logger.info(f"Intent EXIT: '{text}'")
+            return Intent.EXIT, text
+
+        # 2 — Memory management
+        if self._matches(text, self._memory_re):
+            logger.info(f"Intent CLEAR_MEMORY: '{text}'")
+            return Intent.CLEAR_MEMORY, text
+
+        # 3 — Instant canned replies to greetings (no AI round-trip)
+        if ENABLE_FAST_RESPONSES:
+            reply = FAST_RESPONSES.get(_normalize_key(text))
+            if reply:
+                logger.info(f"Intent FAST_RESPONSE: '{text}'")
+                return Intent.FAST_RESPONSE, reply
+
+        # 4 — System commands
+        if self._matches(text, self._command_re):
+            logger.info(f"Intent COMMAND: '{text}'")
+            return Intent.COMMAND, text
+
+        # 5 — DEFAULT: send everything else to the AI brain
+        logger.info(f"Intent AI_QUESTION: '{text}'")
+        return Intent.AI_QUESTION, text
+
+    def _matches(
+        self,
+        text: str,
+        patterns: List[Pattern]
+    ) -> bool:
+        """Return True if text matches any compiled pattern."""
+        return any(p.search(text) for p in patterns)

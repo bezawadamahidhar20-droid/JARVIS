@@ -10,7 +10,9 @@ import re
 import subprocess
 import webbrowser
 
-from utils import logger
+from utils.logger import get_logger
+
+logger = get_logger("system_commands")
 
 # ── Helpers (defined before the lookup tables that call them) ─────────────────
 
