@@ -1,7 +1,6 @@
 """Streaming microphone capture with automatic speech start/stop."""
 
 import threading
-from typing import List, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -21,7 +20,7 @@ class SpeechRecorder:
     def __init__(self, sample_rate: int = 16000, channels: int = 1,
                  dtype: str = "float32", frame_ms: int = 30,
                  min_speech_ms: int = 250, silence_ms: int = 900,
-                 max_record_ms: int = 15000, input_device: Optional[int] = None,
+                 max_record_ms: int = 15000, input_device: int | None = None,
                  calibration_ms: int = 500, flush_ms: int = 150,
                  initial_threshold: float = 0.012, multiplier: float = 3.0,
                  alpha: float = 0.15, settle_frames: int = 10,
@@ -51,8 +50,8 @@ class SpeechRecorder:
             calibration_frames=max(1, int(calibration_ms / frame_ms)),
         )
 
-        self._buffer: List[np.ndarray] = []
-        self._recent: List[np.ndarray] = []
+        self._buffer: list[np.ndarray] = []
+        self._recent: list[np.ndarray] = []
         self._speech_frames = 0
         self._silence_frames = 0
         self._max_reached = False

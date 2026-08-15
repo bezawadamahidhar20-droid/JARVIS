@@ -1,9 +1,10 @@
-import sounddevice as sd
-import numpy as np
-from scipy.io.wavfile import write
-from faster_whisper import WhisperModel
-import requests
 import time
+
+import numpy as np
+import requests
+import sounddevice as sd
+from faster_whisper import WhisperModel
+from scipy.io.wavfile import write
 
 SAMPLE_RATE = 16000
 DURATION = 4
@@ -53,7 +54,7 @@ def record_audio():
 def transcribe_audio(audio_file):
     print("🧠 Understanding...")
 
-    segments, info = whisper.transcribe(
+    segments, _ = whisper.transcribe(
         audio_file,
         beam_size=1,
         language="en",

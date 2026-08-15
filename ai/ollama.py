@@ -1,7 +1,6 @@
 """Local Ollama client for Qwen3 via the /api/generate endpoint."""
 
 from collections import deque
-from typing import Deque, Tuple
 
 import requests
 
@@ -39,7 +38,7 @@ class OllamaClient:
         # Sliding window of recent (user, assistant) turns. Oldest entries
         # are dropped first so the prompt stays bounded.
         self.memory_turns = memory_turns
-        self.history: Deque[Tuple[str, str]] = deque(maxlen=memory_turns)
+        self.history: deque[tuple[str, str]] = deque(maxlen=memory_turns)
 
     def _tags_url(self) -> str:
         return self.url.rsplit("/api/", 1)[0] + "/api/tags"

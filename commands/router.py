@@ -2,12 +2,8 @@
 
 import os
 import re
-import shutil
 import subprocess
 from datetime import datetime
-from typing import Optional, Union
-
-from utils import logger
 
 TIME_PATTERNS = (
     "what time", "current time", "what's the time", "whats the time",
@@ -27,14 +23,14 @@ CHROME_CANDIDATES = (
 )
 
 
-def _find_chrome() -> Optional[str]:
+def _find_chrome() -> str | None:
     for path in CHROME_CANDIDATES:
         if os.path.isfile(path):
             return path
     return None
 
 
-def _launch_ui(path_or_args: Union[str, list]) -> None:
+def _launch_ui(path_or_args: str | list) -> None:
     if isinstance(path_or_args, str):
         os.startfile(path_or_args)
     else:
@@ -48,7 +44,7 @@ class CommandRouter:
     the caller can fall back to Qwen3.
     """
 
-    def route(self, text: str) -> tuple[Optional[str], None]:
+    def route(self, text: str) -> tuple[str | None, None]:
         t = " " + text.strip().lower() + " "
 
         if any(p in t for p in TIME_PATTERNS):

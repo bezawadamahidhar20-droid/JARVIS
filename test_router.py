@@ -9,8 +9,8 @@ never return "exit" (that would let words inside normal sentences shut down
 JARVIS).
 """
 
-import sys
 import shutil
+import sys
 
 from commands.router import CommandRouter, _find_chrome
 

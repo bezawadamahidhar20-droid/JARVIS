@@ -1,10 +1,9 @@
 """Local neural text-to-speech using Piper (ONNX, fully offline)."""
 
-from typing import Optional, Tuple
 
 import numpy as np
-from piper import PiperVoice
 import sounddevice as sd
+from piper import PiperVoice
 
 import config
 from utils import logger
@@ -20,7 +19,7 @@ class TTSEngine:
 
     def __init__(self, voice_path: str = config.TTS_VOICE_PATH):
         self.voice_path = voice_path
-        self.voice: Optional[PiperVoice] = None
+        self.voice: PiperVoice | None = None
         self.ready: bool = False
 
     def initialize(self) -> None:
@@ -39,10 +38,10 @@ class TTSEngine:
             logger.error(f"TTS initialization failed: {exc}")
             raise
         self.ready = True
-        logger.ok(f"TTS ready")
+        logger.ok("TTS ready")
         logger.info(f"TTS voice: {self.voice.config.espeak_voice} ({self.voice.config.sample_rate} Hz)")
 
-    def _synth_to_array(self, text: str) -> Tuple[Optional[np.ndarray], int]:
+    def _synth_to_array(self, text: str) -> tuple[np.ndarray | None, int]:
         chunks = [ch.audio_float_array for ch in self.voice.synthesize(text)]
         if not chunks:
             return None, self.voice.config.sample_rate

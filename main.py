@@ -10,8 +10,8 @@ import sounddevice as sd
 
 import config
 from ai.ollama import (
-    OllamaClient,
     ModelMissingError,
+    OllamaClient,
     OllamaResponseError,
     OllamaUnavailableError,
 )
