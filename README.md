@@ -42,6 +42,7 @@
 | 🔒 | **100% local / offline** | All inference happens on your machine; audio is processed in memory |
 | ⚡ | **In-memory audio** | No temp WAV files in the production path — audio lives only in RAM |
 | 📊 | **Pipeline timing** | Every stage (capture, STT, routing, LLM, TTS) is timed and reported per turn |
+| 🖥️ | **Live terminal dashboard** | Persistent real-time HUD: audio level, stage timings, session stats, live state |
 
 ---
 
@@ -276,6 +277,7 @@ Everything lives in [`config.py`](config.py):
 | `OLLAMA_KEEP_ALIVE` | `"30m"` | Keep model resident between turns |
 | `TTS_VOICE_PATH` | `"voices/en_US-lessac-medium.onnx"` | Piper voice |
 | `SYSTEM_PROMPT` | *(JARVIS personality)* | Instructs concise spoken answers |
+| `DEBUG` | `False` | Show diagnostics on the dashboard (or `JARVIS_DEBUG=1`) |
 
 Tune capture/VAD in `audio/vad.py` and `audio/microphone.py` for your room and mic.
 
@@ -287,35 +289,43 @@ Tune capture/VAD in `audio/vad.py` and `audio/microphone.py` for your room and m
 python main.py
 ```
 
-You should see:
+You should see a **live terminal dashboard** (a single persistent screen, not printed lines):
 
 ```
-============================
-       JARVIS ONLINE
-============================
-[+] Command router ready
-[*] JARVIS is listening...
-
-[*] Listening...
+┌─ JARVIS ────────────────────────────────────────────────┐
+│        _____    ____ _    ___________                   │
+│       / /   |  / __ \ |  / /  _/ ___/                   │
+│  __  / / /| | / /_/ / | / // / \__ \                    │
+│ / /_/ / ___ |/ _, _/| |/ // / ___/ /                    │
+│ \____/_/  |_/_/ |_| |___/___//____/                     │
+│   LOCAL  •  AI  VOICE  ASSISTANT  »  LISTENING          │
+└─────────────────────────────────────────────────────────┘
+┌─ SYSTEM ──────────────┐┌──── JARVIS CONSOLE ────────────┐
+│ ✓ Microphone  …       ││ » YOU                          │
+│ ✓ Whisper     base    ││   what is python               │
+│ ✓ Router      —       ││ ✓ AI  qwen3:8b                 │
+│ ✓ Ollama      qwen3:8b││ » JARVIS                       │
+│ ✓ TTS         —       ││   Python is a high-level...    │
+└───────────────────────┘└────────────────────────────────┘
+┌─ SESSION ────┐┌─ PERFORMANCE ──┐
+│ Requests  2  ││ CAPTURE 1.84s  │
+│ Commands  0  ││ WHISPER 1.12s  │
+│ Questions  2 ││ AI      6.50s  │
+│ Avg latency 11.8s││ TTS    2.30s │
+│ Session    48s ││ TOTAL 11.76s │
+└──────────────┘└───────────────┘
+┌─────────────────────────────────────────────────────────┐
+│ ●  LISTENING  •  Speak naturally…                       │
+│ AUDIO  ████████░░░░░░░░░░░░░░  0.0420                   │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Then speak. A realistic turn (timing values are **illustrative only** — they depend entirely on your hardware):
+The left panels show real-time component status, session stats, and per-stage
+timings; the footer shows the live state with an animated spinner and a real
+audio-level bar (actual mic RMS). In legacy consoles (cp1252, no Unicode) the
+UI automatically falls back to plain ASCII box-drawing and symbols.
 
-```
-[*] Listening...
-[CAPTURE] 1.84 sec
-[i] [VOICE] Speech detected
-[WHISPER] 1.12 sec
-[USER] what is python
-[ROUTER] 0.00 sec
-[OLLAMA] 6.50 sec
-[JARVIS] Python is a high-level, general-purpose programming language known for its readability.
-[*] TTS: Speaking...
-[TTS] 2.30 sec
-[TOTAL] 11.76 sec
-```
-
-Say *"what time is it"*, *"open Chrome"*, *"what is the capital of France?"* — or simply *"goodbye"* to shut down.
+Then speak. Say *"what time is it"*, *"open Chrome"*, *"what is the capital of France?"* — or simply *"goodbye"* to shut down.
 
 ---
 
@@ -510,7 +520,8 @@ JARVIS/
 ├── utils/
 │   ├── __init__.py
 │   ├── dataset.py            # Real-conversation logger (ShareGPT JSONL for fine-tuning)
-│   └── logger.py            # Logging + per-stage timing helpers
+│   ├── logger.py            # Logging + per-stage timing helpers (sink-able for the UI)
+│   └── terminal_ui.py        # Rich live terminal dashboard (presentation layer)
 ├── tools/
 │   ├── prepare_dataset.py    # Dedupe/filter raw logs → training JSON
 │   └── finetune_qwen3.ipynb  # Colab notebook: Unsloth QLoRA fine-tune → GGUF → Ollama
@@ -542,6 +553,9 @@ A locally served 8B model gives real conversational ability without external acc
 
 ### Deterministic command router
 Local OS actions are too safety- and latency-sensitive to leave to an LLM. Fixed pattern matching gives instant, repeatable behavior and a hard security boundary: **only pre-approved actions ever execute** (see [Security](#-security)).
+
+### Live terminal dashboard
+The UI is a strict presentation layer in `utils/terminal_ui.py`. It never captures, transcribes, routes, or speaks — `main.py` drives it by pushing state, messages, and timing metrics, and the dashboard re-renders on a background refresh thread. Real mic RMS feeds the audio-level bar; per-stage timings come from the actual pipeline. If the console can't print Unicode, it falls back to ASCII automatically.
 
 ### Adaptive VAD
 Fixed-duration recording is wasteful and sloppy. An RMS threshold that tracks ambient noise, combined with a ring buffer of pre-speech frames, records exactly the utterance — start to end — without cutting words off.
@@ -639,7 +653,7 @@ Planned / future work (not yet implemented):
 - **Current-information tools** — a local source or opt-in connector for live data.
 - **More desktop commands** — broader app catalog and window control.
 - **Configurable personalities** — alternate system prompts/voices.
-- **GUI** — visual status, device selection, and diagnostics.
+- **GUI** — visual status, device selection, and diagnostics. *(terminal dashboard is shipped; a native GUI is still future work)*
 - **Richer diagnostics** — device/level graphs and capture reports.
 - **GPU acceleration** — optional CTranslate2 / Ollama GPU offload.
 

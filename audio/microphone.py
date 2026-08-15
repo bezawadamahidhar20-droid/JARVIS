@@ -61,6 +61,9 @@ class SpeechRecorder:
         self._flush_remaining = 0
         self._finished = threading.Event()
         self._lock = threading.Lock()
+        # Latest frame RMS, written by the PortAudio callback thread and read
+        # by the UI thread.  A bare float is atomic enough under the GIL.
+        self._last_rms: float = 0.0
 
     @property
     def display_name(self) -> str:
@@ -72,6 +75,20 @@ class SpeechRecorder:
             pass
         return str(self.input_device)
 
+    @property
+    def live_rms(self) -> float:
+        """RMS of the most recently captured frame (0.0 while idle).
+
+        Written continuously by the capture callback thread, so a UI can show
+        real audio levels while ``capture_speech()`` is blocking.
+        """
+        return self._last_rms
+
+    @property
+    def live_speech(self) -> bool:
+        """True while the recorder is actively capturing speech."""
+        return self._state == "speaking"
+
     def _callback(self, indata, frames, time_info, status) -> None:
         chunk = indata[:, 0].copy()
 
@@ -81,6 +98,7 @@ class SpeechRecorder:
                 return
 
             rms = float(np.sqrt(np.mean(chunk * chunk)))
+            self._last_rms = rms
             speech = self.vad.is_speech(rms)
 
             if self._state == "settling":

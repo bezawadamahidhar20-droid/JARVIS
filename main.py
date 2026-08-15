@@ -33,6 +33,7 @@ from commands.router import CommandRouter
 from speech.tts import TTSEngine
 from speech.whisper import WhisperEngine
 from utils import dataset, logger
+from utils.terminal_ui import TerminalUI
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -47,12 +48,6 @@ EXIT_PHRASES: frozenset[str] = frozenset({
     "stop jarvis",
     "shut down jarvis",
 })
-
-BANNER: str = (
-    "============================\n"
-    "       JARVIS ONLINE\n"
-    "============================\n"
-)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -103,163 +98,179 @@ def mic_cooldown(seconds: float = config.POST_TTS_COOLDOWN_S) -> None:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print(BANNER)
+    ui = TerminalUI(debug=config.DEBUG)
+    logger.set_sink(ui.log_sink)
+    ui.start()
 
-    # ── Microphone availability ───────────────────────────────────────────────
     try:
-        sd.query_devices(kind="input")
-    except Exception as exc:
-        logger.error(f"Microphone unavailable: {exc}")
-        return
-
-    # ── Whisper ───────────────────────────────────────────────────────────────
-    try:
-        whisper = WhisperEngine(
-            model_size=config.WHISPER_MODEL,
-            device=config.WHISPER_DEVICE,
-            compute_type=config.WHISPER_COMPUTE_TYPE,
-            language=config.WHISPER_LANGUAGE,
-            beam_size=config.WHISPER_BEAM_SIZE,
-        )
-    except Exception as exc:
-        logger.error(f"Whisper failed to load: {exc}")
-        return
-
-    # ── Ollama (non-fatal if down — local commands still work) ────────────────
-    ollama = OllamaClient()
-    try:
-        ollama.check_available()
-    except (OllamaUnavailableError, ModelMissingError, OllamaResponseError) as exc:
-        logger.error(str(exc))
-        logger.warning("Conversational questions will not work until Ollama is fixed.")
-
-    # ── Command router ────────────────────────────────────────────────────────
-    router = CommandRouter()
-    logger.ok("Command router ready")
-
-    # ── Conversation dataset (fine-tuning) ────────────────────────────────────
-    dataset_logger = dataset.ConversationDataset(
-        path=config.DATASET_PATH,
-        system_prompt=config.SYSTEM_PROMPT,
-    )
-
-    # ── TTS ───────────────────────────────────────────────────────────────────
-    tts = TTSEngine()
-    try:
-        tts.initialize()
-    except Exception as exc:
-        logger.error(f"TTS unavailable: {exc}")
-
-    # ── Microphone recorder ───────────────────────────────────────────────────
-    recorder = SpeechRecorder(
-        sample_rate=config.SAMPLE_RATE,
-        channels=config.CHANNELS,
-        input_device=config.INPUT_DEVICE,
-        frame_ms=config.FRAME_MS,
-        min_speech_ms=config.MIN_SPEECH_MS,
-        silence_ms=config.SILENCE_MS,
-        max_record_ms=config.MAX_RECORD_MS,
-        calibration_ms=config.CALIBRATION_MS,
-        flush_ms=config.STREAM_FLUSH_MS,
-        initial_threshold=config.INITIAL_RMS_THRESHOLD,
-        multiplier=config.NOISE_MULTIPLIER,
-        alpha=config.NOISE_EMA_ALPHA,
-    )
-
-    print()
-    logger.status("JARVIS is listening...\n")
-
-    # ── Main loop ─────────────────────────────────────────────────────────────
-    while True:
-        turn_start: float = logger.tick()
-        logger.status("Listening...")
-
-        # 1. Capture utterance via VAD-gated streaming mic.
+        # ── Microphone availability ───────────────────────────────────────────
         try:
-            audio = recorder.capture_speech()
-        except sd.PortAudioError as exc:
-            logger.error(f"Microphone error: {exc}")
-            logger.error("Shutting down — restart JARVIS after fixing the microphone.")
-            return
-        logger.report("CAPTURE", turn_start)
-        logger.info("[VOICE] Speech detected")
-
-        if len(audio) == 0:
-            logger.warning("No speech detected\n")
-            continue
-
-        # 2. Transcribe with Faster-Whisper.
-        w_start: float = logger.tick()
-        try:
-            text: str = whisper.transcribe(audio)
+            sd.query_devices(kind="input")
         except Exception as exc:
-            logger.error(f"Whisper failed: {exc}\n")
-            continue
-        logger.report("WHISPER", w_start)
+            logger.error(f"Microphone unavailable: {exc}")
+            ui.set_component("Microphone", "error", "missing")
+            return
 
-        print(f"[USER] {text}")
+        # ── Whisper ───────────────────────────────────────────────────────────
+        try:
+            whisper = WhisperEngine(
+                model_size=config.WHISPER_MODEL,
+                device=config.WHISPER_DEVICE,
+                compute_type=config.WHISPER_COMPUTE_TYPE,
+                language=config.WHISPER_LANGUAGE,
+                beam_size=config.WHISPER_BEAM_SIZE,
+            )
+            ui.set_component("Whisper", "ok", config.WHISPER_MODEL)
+        except Exception as exc:
+            logger.error(f"Whisper failed to load: {exc}")
+            ui.set_component("Whisper", "error", "load failed")
+            return
 
-        # 3. Noise filter.
-        if not is_meaningful(text):
-            logger.warning("No speech detected\n")
-            continue
+        # ── Ollama (non-fatal if down — local commands still work) ────────────
+        ollama = OllamaClient()
+        try:
+            ollama.check_available()
+            ui.set_component("Ollama", "ok", config.OLLAMA_MODEL)
+        except (OllamaUnavailableError, ModelMissingError, OllamaResponseError) as exc:
+            logger.error(str(exc))
+            logger.warning("Conversational questions will not work until Ollama is fixed.")
+            ui.set_component("Ollama", "error", "unavailable")
 
-        # 4. Exit check — whole-utterance match only.
-        #    Words like "exit" or "quit" inside a normal sentence never match
-        #    because is_exit_phrase() compares the FULL normalised string.
-        if is_exit_phrase(text):
-            tts.speak("Goodbye.")
-            print("[*] JARVIS shutting down.")
-            break
+        # ── Command router ────────────────────────────────────────────────────
+        router = CommandRouter()
+        logger.ok("Command router ready")
+        ui.set_component("Router", "ok")
 
-        # 5. Deterministic command routing.
-        r_start: float = logger.tick()
-        command, _ = router.route(text)
-        logger.report("ROUTER", r_start)
+        # ── Conversation dataset (fine-tuning) ────────────────────────────────
+        dataset_logger = dataset.ConversationDataset(
+            path=config.DATASET_PATH,
+            system_prompt=config.SYSTEM_PROMPT,
+        )
 
-        # 6. Execute command or ask Qwen3.
-        response: str
-        if command is not None:
-            logger.info(f"[COMMAND] {command}")
+        # ── TTS ───────────────────────────────────────────────────────────────
+        tts = TTSEngine()
+        try:
+            tts.initialize()
+            ui.set_component("TTS", "ok")
+        except Exception as exc:
+            logger.error(f"TTS unavailable: {exc}")
+            ui.set_component("TTS", "error", "unavailable")
+
+        # ── Microphone recorder ───────────────────────────────────────────────
+        recorder = SpeechRecorder(
+            sample_rate=config.SAMPLE_RATE,
+            channels=config.CHANNELS,
+            input_device=config.INPUT_DEVICE,
+            frame_ms=config.FRAME_MS,
+            min_speech_ms=config.MIN_SPEECH_MS,
+            silence_ms=config.SILENCE_MS,
+            max_record_ms=config.MAX_RECORD_MS,
+            calibration_ms=config.CALIBRATION_MS,
+            flush_ms=config.STREAM_FLUSH_MS,
+            initial_threshold=config.INITIAL_RMS_THRESHOLD,
+            multiplier=config.NOISE_MULTIPLIER,
+            alpha=config.NOISE_EMA_ALPHA,
+        )
+        ui.set_recorder(recorder)
+        ui.set_component("Microphone", "ok", recorder.display_name())
+
+        # ── Main loop ─────────────────────────────────────────────────────────
+        while True:
+            turn_start: float = logger.tick()
+            ui.set_state("listening")
+
+            # 1. Capture utterance via VAD-gated streaming mic.
             try:
-                response = router.execute(command)
-            except Exception as exc:
-                logger.error(f"Command execution failed: {exc}")
-                response = "Sorry, I could not complete that command."
-        else:
+                audio = recorder.capture_speech()
+            except sd.PortAudioError as exc:
+                logger.error(f"Microphone error: {exc}")
+                logger.error("Shutting down — restart JARVIS after fixing the microphone.")
+                return
+            logger.report("CAPTURE", turn_start)
+            logger.info("[VOICE] Speech detected")
+
+            if len(audio) == 0:
+                logger.warning("No speech detected")
+                continue
+
+            # 2. Transcribe with Faster-Whisper.
+            ui.set_state("thinking", "Whisper transcribing…")
+            w_start: float = logger.tick()
             try:
-                o_start: float = logger.tick()
-                response = ollama.generate(text)
-                logger.report("OLLAMA", o_start)
-            except OllamaUnavailableError as exc:
-                logger.error(str(exc))
-                response = "Ollama is not running, so I cannot answer that right now."
-            except ModelMissingError as exc:
-                logger.error(str(exc))
-                response = "The Qwen model is not installed on this Ollama."
-            except OllamaResponseError as exc:
-                logger.error(str(exc))
-                response = "Ollama returned an error while answering."
+                text: str = whisper.transcribe(audio)
             except Exception as exc:
-                logger.error(f"Ollama failed: {exc}")
-                response = "Sorry, something went wrong on my end."
+                logger.error(f"Whisper failed: {exc}")
+                continue
+            logger.report("WHISPER", w_start)
 
-        # 7. Speak and record the exchange for multi-turn context.
-        print(f"[JARVIS] {response}")
-        tts.speak(response)
-        ollama.add_turn(text, response)
-        # Collect real data for a future fine-tune.
-        dataset_logger.record(text, response)
-        logger.report("TOTAL", turn_start)
-        print()
+            ui.add_message("user", text)
 
-        # 8. Post-TTS hold-off: let the speaker tail decay before re-arming.
-        mic_cooldown()
+            # 3. Noise filter.
+            if not is_meaningful(text):
+                logger.warning("No speech detected")
+                continue
+
+            # 4. Exit check — whole-utterance match only.
+            #    Words like "exit" or "quit" inside a normal sentence never match
+            #    because is_exit_phrase() compares the FULL normalised string.
+            if is_exit_phrase(text):
+                ui.set_state("speaking", "Saying goodbye…")
+                tts.speak("Goodbye.")
+                ui.add_message("jarvis", "Goodbye.")
+                return
+
+            # 5. Deterministic command routing.
+            r_start: float = logger.tick()
+            command, _ = router.route(text)
+            logger.report("ROUTER", r_start)
+
+            # 6. Execute command or ask Qwen3.
+            response: str
+            if command is not None:
+                logger.info(f"[COMMAND] {command}")
+                ui.add_message("command", command)
+                try:
+                    response = router.execute(command)
+                except Exception as exc:
+                    logger.error(f"Command execution failed: {exc}")
+                    response = "Sorry, I could not complete that command."
+            else:
+                ui.set_state("thinking", "Qwen3 generating…")
+                try:
+                    o_start: float = logger.tick()
+                    response = ollama.generate(text)
+                    logger.report("OLLAMA", o_start)
+                    ui.add_message("ai", config.OLLAMA_MODEL)
+                except OllamaUnavailableError as exc:
+                    logger.error(str(exc))
+                    response = "Ollama is not running, so I cannot answer that right now."
+                except ModelMissingError as exc:
+                    logger.error(str(exc))
+                    response = "The Qwen model is not installed on this Ollama."
+                except OllamaResponseError as exc:
+                    logger.error(str(exc))
+                    response = "Ollama returned an error while answering."
+                except Exception as exc:
+                    logger.error(f"Ollama failed: {exc}")
+                    response = "Sorry, something went wrong on my end."
+
+            # 7. Speak and record the exchange for multi-turn context.
+            ui.set_state("speaking", "JARVIS responding…")
+            ui.add_message("jarvis", response)
+            tts.speak(response)
+            ollama.add_turn(text, response)
+            # Collect real data for a future fine-tune.
+            dataset_logger.record(text, response)
+            logger.report("TOTAL", turn_start)
+
+            # 8. Post-TTS hold-off: let the speaker tail decay before re-arming.
+            mic_cooldown()
+    finally:
+        ui.stop()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print()
         logger.status("JARVIS stopped.")
