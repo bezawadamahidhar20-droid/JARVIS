@@ -30,9 +30,12 @@ OLLAMA_MODEL = "qwen3:8b"
 OLLAMA_TIMEOUT = 120
 OLLAMA_NUM_PREDICT = 120  # cap generation length for voice-friendly replies
 OLLAMA_KEEP_ALIVE = "30m"  # keep model resident between turns
+OLLAMA_MEMORY_TURNS = 5  # recent user/assistant pairs kept as conversation context
 
 # ---- Text-to-speech ----
 TTS_VOICE_PATH = "voices/en_US-lessac-medium.onnx"
+POST_TTS_COOLDOWN_S = 0.75  # pause after speaking before re-arming the mic,
+                            # so JARVIS does not re-capture its own reply
 
 # ---- JARVIS personality ----
 SYSTEM_PROMPT = (

@@ -1,0 +1,14 @@
+# JARVIS runtime dependencies
+# Generated from the packages actually imported by the codebase,
+# pinned to versions verified in the development environment.
+# Python 3.10+ required.
+
+sounddevice==0.5.5      # audio capture + playback (audio/microphone.py, speech/tts.py)
+numpy==2.5.2            # audio buffer math
+faster-whisper==1.2.1   # on-device speech-to-text (speech/whisper.py)
+piper-tts==1.6.1        # neural text-to-speech (speech/tts.py)
+requests==2.34.2        # Ollama HTTP client (ai/ollama.py)
+
+# Test / diagnostic scripts only
+scipy==1.18.0           # WAV read/write in test_*.py
+ollama==0.6.2           # Python SDK for test_qwen.py

@@ -12,17 +12,17 @@ class AdaptiveVAD:
     frames, so background noise changes do not require retuning.
     """
 
-    def __init__(self, initial_threshold=0.012, multiplier=3.0,
-                 alpha=0.15, calibration_frames=16):
+    def __init__(self, initial_threshold: float = 0.012, multiplier: float = 3.0,
+                 alpha: float = 0.15, calibration_frames: int = 16):
         self.initial_threshold = initial_threshold
         self.multiplier = multiplier
         self.alpha = alpha
         self.calibration_frames = calibration_frames
-        self.noise = initial_threshold
-        self.ready = False
-        self._count = 0
+        self.noise: float = initial_threshold
+        self.ready: bool = False
+        self._count: int = 0
 
-    def is_speech(self, rms):
+    def is_speech(self, rms: float) -> bool:
         if not self.ready:
             self.noise += self.alpha * (rms - self.noise)
             self._count += 1
@@ -38,7 +38,7 @@ class AdaptiveVAD:
 
         return speech
 
-    def reset(self):
+    def reset(self) -> None:
         self.noise = self.initial_threshold
         self.ready = False
         self._count = 0

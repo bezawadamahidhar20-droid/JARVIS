@@ -5,10 +5,9 @@ import re
 import shutil
 import subprocess
 from datetime import datetime
+from typing import Optional, Union
 
 from utils import logger
-
-EXIT_KEYS = ("goodbye", "exit", "quit", "stop jarvis", "shut down jarvis")
 
 TIME_PATTERNS = (
     "what time", "current time", "what's the time", "whats the time",
@@ -28,14 +27,14 @@ CHROME_CANDIDATES = (
 )
 
 
-def _find_chrome():
+def _find_chrome() -> Optional[str]:
     for path in CHROME_CANDIDATES:
         if os.path.isfile(path):
             return path
     return None
 
 
-def _launch_ui(path_or_args):
+def _launch_ui(path_or_args: Union[str, list]) -> None:
     if isinstance(path_or_args, str):
         os.startfile(path_or_args)
     else:
@@ -49,13 +48,8 @@ class CommandRouter:
     the caller can fall back to Qwen3.
     """
 
-    def route(self, text):
+    def route(self, text: str) -> tuple[Optional[str], None]:
         t = " " + text.strip().lower() + " "
-
-        if re.search(r"\b(exit|quit)\b", t) or any(
-            key in t for key in ("goodbye", "stop jarvis", "shut down jarvis")
-        ):
-            return ("exit", None)
 
         if any(p in t for p in TIME_PATTERNS):
             return ("tell_time", None)
@@ -75,11 +69,13 @@ class CommandRouter:
 
         return (None, None)
 
-    def execute(self, command):
-        """Run a matched command and return what JARVIS should say."""
-        if command == "exit":
-            print("[*] JARVIS: Goodbye.")
-            return "Goodbye."
+    def execute(self, command: str) -> str:
+        """Run a matched command and return what JARVIS should say.
+
+        Exit/quit handling intentionally lives in main.py (is_exit_phrase),
+        never here, so words like "exit" or "quit" inside a normal sentence
+        can never trigger a shutdown.
+        """
         if command == "tell_time":
             now = datetime.now().strftime("%I:%M %p").lstrip("0")
             return f"The time is {now}."

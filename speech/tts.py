@@ -1,5 +1,7 @@
 """Local neural text-to-speech using Piper (ONNX, fully offline)."""
 
+from typing import Optional, Tuple
+
 import numpy as np
 from piper import PiperVoice
 import sounddevice as sd
@@ -16,12 +18,12 @@ class TTSEngine:
     else in JARVIS needs to change.
     """
 
-    def __init__(self, voice_path=config.TTS_VOICE_PATH):
+    def __init__(self, voice_path: str = config.TTS_VOICE_PATH):
         self.voice_path = voice_path
-        self.voice = None
-        self.ready = False
+        self.voice: Optional[PiperVoice] = None
+        self.ready: bool = False
 
-    def initialize(self):
+    def initialize(self) -> None:
         if self.ready:
             return
         logger.status("Initializing TTS...")
@@ -40,13 +42,13 @@ class TTSEngine:
         logger.ok(f"TTS ready")
         logger.info(f"TTS voice: {self.voice.config.espeak_voice} ({self.voice.config.sample_rate} Hz)")
 
-    def _synth_to_array(self, text):
+    def _synth_to_array(self, text: str) -> Tuple[Optional[np.ndarray], int]:
         chunks = [ch.audio_float_array for ch in self.voice.synthesize(text)]
         if not chunks:
             return None, self.voice.config.sample_rate
         return np.concatenate(chunks), self.voice.config.sample_rate
 
-    def speak(self, text):
+    def speak(self, text: str) -> float:
         """Synthesizes and speaks `text`. Returns duration in seconds.
 
         Never raises: TTS failures are logged, not fatal.

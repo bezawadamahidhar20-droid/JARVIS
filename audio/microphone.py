@@ -1,6 +1,7 @@
 """Streaming microphone capture with automatic speech start/stop."""
 
 import threading
+from typing import List, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -17,12 +18,14 @@ class SpeechRecorder:
     a hard cap. No audio is written to disk.
     """
 
-    def __init__(self, sample_rate=16000, channels=1, dtype="float32",
-                 frame_ms=30, min_speech_ms=250, silence_ms=900,
-                 max_record_ms=15000, input_device=None,
-                 calibration_ms=500, flush_ms=150,
-                 initial_threshold=0.012, multiplier=3.0, alpha=0.15,
-                 settle_frames=10, max_settle_ms=2000):
+    def __init__(self, sample_rate: int = 16000, channels: int = 1,
+                 dtype: str = "float32", frame_ms: int = 30,
+                 min_speech_ms: int = 250, silence_ms: int = 900,
+                 max_record_ms: int = 15000, input_device: Optional[int] = None,
+                 calibration_ms: int = 500, flush_ms: int = 150,
+                 initial_threshold: float = 0.012, multiplier: float = 3.0,
+                 alpha: float = 0.15, settle_frames: int = 10,
+                 max_settle_ms: int = 2000):
         self.sample_rate = sample_rate
         self.channels = channels
         self.dtype = dtype
@@ -48,8 +51,8 @@ class SpeechRecorder:
             calibration_frames=max(1, int(calibration_ms / frame_ms)),
         )
 
-        self._buffer = []
-        self._recent = []
+        self._buffer: List[np.ndarray] = []
+        self._recent: List[np.ndarray] = []
         self._speech_frames = 0
         self._silence_frames = 0
         self._max_reached = False
@@ -61,7 +64,7 @@ class SpeechRecorder:
         self._lock = threading.Lock()
 
     @property
-    def display_name(self):
+    def display_name(self) -> str:
         try:
             idx = sd.default.device[0] if self.input_device is None else self.input_device
             if isinstance(idx, int):
@@ -70,7 +73,7 @@ class SpeechRecorder:
             pass
         return str(self.input_device)
 
-    def _callback(self, indata, frames, time_info, status):
+    def _callback(self, indata, frames, time_info, status) -> None:
         chunk = indata[:, 0].copy()
 
         with self._lock:
@@ -124,7 +127,7 @@ class SpeechRecorder:
                 self._max_reached = True
                 self._finished.set()
 
-    def capture_speech(self):
+    def capture_speech(self) -> np.ndarray:
         """Records until trailing silence (or hard cap); returns float32 mono."""
         self._buffer = []
         self._recent = []

@@ -4,6 +4,7 @@ Pipeline: VAD capture -> Faster-Whisper -> command router / Qwen3 -> Piper TTS
 """
 
 import re
+import time
 
 import sounddevice as sd
 
@@ -29,11 +30,11 @@ BANNER = (
 )
 
 
-def _words(text):
+def _words(text: str) -> str:
     return " ".join(re.sub(r"[^a-z ]", "", text.strip().lower()).split())
 
 
-def is_exit_phrase(text):
+def is_exit_phrase(text: str) -> bool:
     """True only when the whole utterance is an exit phrase.
 
     Guards against false exits from sentences that merely contain
@@ -42,10 +43,20 @@ def is_exit_phrase(text):
     return _words(text) in EXIT_PHRASES
 
 
-def is_meaningful(text):
+def is_meaningful(text: str) -> bool:
     """Reject noise transcriptions without blocking short commands."""
     t = text.strip()
     return len(t) >= 2 and sum(c.isalpha() for c in t) >= 2
+
+
+def mic_cooldown(seconds: float = config.POST_TTS_COOLDOWN_S) -> None:
+    """Pause after TTS playback before the mic re-arms.
+
+    Without this, JARVIS can re-capture the tail of its own spoken reply
+    because the speaker is still in the air when capture restarts.
+    """
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 def main():
@@ -170,8 +181,11 @@ def main():
 
         print(f"[JARVIS] {response}")
         tts.speak(response)
+        # Remember the exchange so the LLM has context across turns.
+        ollama.add_turn(text, response)
         logger.report("TOTAL", turn_start)
         print()
+        mic_cooldown()
 
 
 if __name__ == "__main__":
