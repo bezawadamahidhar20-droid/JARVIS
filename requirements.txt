@@ -1,14 +1,28 @@
-# JARVIS runtime dependencies
-# Generated from the packages actually imported by the codebase,
-# pinned to versions verified in the development environment.
-# Python 3.10+ required.
+# JARVIS — pinned runtime dependencies
+# Python 3.10+  |  Windows x64 (primary), Linux/macOS (diagnostics)
+#
+# Install:  pip install -r requirements.txt
+# Setup  :  .\setup.ps1   (Windows)   |   bash setup.sh   (Linux/macOS/WSL)
+#
+# Version rationale
+# ─────────────────
+# sounddevice 0.5.5   — latest stable; ships bundled PortAudio for Windows
+# numpy 2.2.3         — latest stable; required by sounddevice & faster-whisper
+# faster-whisper 1.1.1— latest stable supporting Python 3.9+; pins ctranslate2≥4
+# piper-tts 1.2.0     — latest stable GPL release; ONNX neural TTS
+# requests 2.32.3     — latest stable; Ollama /api/generate HTTP client
+# scipy 1.14.1        — diagnostic/test scripts only (not imported by main pipeline)
+# ollama 0.6.2        — official Python SDK; test_qwen.py only
 
-sounddevice==0.5.5      # audio capture + playback (audio/microphone.py, speech/tts.py)
-numpy==2.5.2            # audio buffer math
-faster-whisper==1.2.1   # on-device speech-to-text (speech/whisper.py)
-piper-tts==1.6.1        # neural text-to-speech (speech/tts.py)
-requests==2.34.2        # Ollama HTTP client (ai/ollama.py)
+# ── Core runtime ──────────────────────────────────────────────────────────────
+sounddevice==0.5.5
+numpy==2.2.3
+faster-whisper==1.1.1
+piper-tts==1.2.0
+requests==2.32.3
 
-# Test / diagnostic scripts only
-scipy==1.18.0           # WAV read/write in test_*.py
-ollama==0.6.2           # Python SDK for test_qwen.py
+# ── Diagnostic / test scripts only ───────────────────────────────────────────
+# (not imported anywhere in the main pipeline: main.py, ai/, audio/, commands/,
+#  speech/, utils/ — safe to omit if you only want the assistant itself)
+scipy==1.14.1
+ollama==0.6.2
