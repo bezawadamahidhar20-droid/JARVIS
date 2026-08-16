@@ -34,6 +34,7 @@ Design rules:
 """
 
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -41,25 +42,35 @@ from urllib.parse import urlparse
 
 import requests
 
+from config import search_config
 from utils.logger import get_logger
 
 logger = get_logger("search")
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import search_config
+__all__ = [
+    "SearchResult",
+    "SearchCache",
+    "SearchRateLimiter",
+    "WebSearchProvider",
+    "TavilyProvider",
+    "SerperProvider",
+    "BraveProvider",
+    "clear_search_cache",
+    "reset_search_rate_limiter",
+    "create_search_provider",
+    "filter_and_rank",
+    "format_results_for_llm",
+    "build_search_query",
+]
 
-    SEARCH_PROVIDER = search_config.PROVIDER
-    SEARCH_API_KEY = search_config.API_KEY
-    SEARCH_MAX_RESULTS = search_config.MAX_RESULTS
-    SEARCH_CACHE_TTL = search_config.CACHE_TTL
-    SEARCH_CACHE_MAX_ENTRIES = search_config.CACHE_MAX_ENTRIES
-except Exception:
-    SEARCH_PROVIDER = "tavily"
-    SEARCH_API_KEY = ""
-    SEARCH_MAX_RESULTS = 5
-    SEARCH_CACHE_TTL = 300
-    SEARCH_CACHE_MAX_ENTRIES = 50
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+SEARCH_PROVIDER = search_config.PROVIDER
+SEARCH_API_KEY = search_config.API_KEY
+SEARCH_MAX_RESULTS = search_config.MAX_RESULTS
+SEARCH_CACHE_TTL = search_config.CACHE_TTL
+SEARCH_CACHE_MAX_ENTRIES = search_config.CACHE_MAX_ENTRIES
+SEARCH_RATE_LIMIT = search_config.RATE_LIMIT
+SEARCH_RATE_WINDOW = search_config.RATE_WINDOW
 
 # Queries that look personal/private are never cached.
 _SENSITIVE_QUERY_RE = re.compile(
@@ -108,6 +119,9 @@ class SearchCache:
     * The cache is bounded: the oldest entry is evicted when
       ``max_entries`` is exceeded.
     * Personal-looking queries are never cached.
+    * Thread-safe: get/put/clear are guarded by a lock, so the main
+      loop, the streaming producer, and the warm-up thread can share
+      the singleton cache without dict-mutation races.
     * All failures are handled by the caller — this class never raises.
     """
 
@@ -118,6 +132,7 @@ class SearchCache:
         )
         # key (query, max_results) -> (monotonic timestamp, results)
         self._data: dict[tuple[str, int], tuple[float, list]] = {}
+        self._lock = threading.Lock()
 
     @staticmethod
     def _key(query: str, max_results: int) -> tuple[str, int]:
@@ -132,14 +147,15 @@ class SearchCache:
         if self.ttl <= 0 or self._is_sensitive(query):
             return None
         key = self._key(query, max_results)
-        item = self._data.get(key)
-        if item is None:
-            return None
-        stored_at, results = item
-        if time.monotonic() - stored_at > self.ttl:
-            self._data.pop(key, None)
-            return None
-        return results
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                return None
+            stored_at, results = item
+            if time.monotonic() - stored_at > self.ttl:
+                self._data.pop(key, None)
+                return None
+            return results
 
     def put(self, query: str, results: list, max_results: int = SEARCH_MAX_RESULTS) -> None:
         """Cache *results* for *query* (bounded, never raises)."""
@@ -147,20 +163,68 @@ class SearchCache:
             return
         try:
             key = self._key(query, max_results)
-            self._data[key] = (time.monotonic(), list(results))
-            # Bounded growth: evict the oldest entry when over capacity.
-            while len(self._data) > max(1, self.max_entries):
-                oldest = min(self._data, key=lambda k: self._data[k][0])
-                del self._data[oldest]
+            with self._lock:
+                self._data[key] = (time.monotonic(), list(results))
+                # Bounded growth: evict the oldest entry when over capacity.
+                while len(self._data) > max(1, self.max_entries):
+                    oldest = min(self._data, key=lambda k: self._data[k][0])
+                    del self._data[oldest]
         except Exception as e:
             logger.warning(f"Search cache write failed: {e}")
 
     def clear(self) -> None:
         """Drop all cached entries."""
-        self._data.clear()
+        with self._lock:
+            self._data.clear()
 
     def __len__(self) -> int:
-        return len(self._data)
+        with self._lock:
+            return len(self._data)
+
+
+class SearchRateLimiter:
+    """
+    Sliding-window rate limiter for external search API calls.
+
+    At most ``limit`` calls are allowed per ``window_seconds`` (0 or a
+    non-positive limit disables throttling). Guarded by a lock so the
+    main loop and the warm-up thread can share one limiter safely.
+    """
+
+    def __init__(
+        self,
+        limit: int | None = None,
+        window_seconds: float | None = None,
+    ) -> None:
+        self.limit = int(
+            limit if limit is not None else SEARCH_RATE_LIMIT
+        )
+        self.window = float(
+            window_seconds if window_seconds is not None else SEARCH_RATE_WINDOW
+        )
+        self._lock = threading.Lock()
+        self._calls: list[float] = []
+
+    def allow(self) -> bool:
+        """True when a call may proceed now; False when throttled."""
+        if self.limit <= 0 or self.window <= 0:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            self._calls = [t for t in self._calls if now - t <= self.window]
+            if len(self._calls) >= self.limit:
+                return False
+            self._calls.append(now)
+            return True
+
+    def reset(self) -> None:
+        """Drop all recorded calls (used by tests)."""
+        with self._lock:
+            self._calls.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._calls)
 
 
 # ── Abstract provider ─────────────────────────────────────────
@@ -191,7 +255,10 @@ class WebSearchProvider(ABC):
         """Serve *query* from the shared cache or run *fetch* and cache.
 
         Only successful results are cached; sensitive queries bypass the
-        cache entirely. Cache failures degrade to a live search.
+        cache entirely. External API calls are throttled by the shared
+        rate limiter (SEARCH_RATE_LIMIT per SEARCH_RATE_WINDOW seconds)
+        so free-tier quotas are never exhausted by a burst. Cache and
+        rate-limit failures degrade to a live search.
         """
         limit = max_results or self.max_results
         try:
@@ -201,6 +268,12 @@ class WebSearchProvider(ABC):
                 return hit
         except Exception as e:
             logger.warning(f"Search cache lookup failed: {e}")
+        if not _SEARCH_RATE_LIMITER.allow():
+            logger.warning(
+                f"Search rate limit reached ({SEARCH_RATE_LIMIT} calls / "
+                f"{SEARCH_RATE_WINDOW}s) — refusing external API call."
+            )
+            return []
         try:
             results = fetch()
         except Exception as e:
@@ -428,10 +501,18 @@ _PROVIDERS: dict[str, type[WebSearchProvider]] = {
 # Shared cache used by every provider instance.
 _SEARCH_CACHE = SearchCache()
 
+# Shared rate limiter used by every provider instance (external calls only).
+_SEARCH_RATE_LIMITER = SearchRateLimiter()
+
 
 def clear_search_cache() -> None:
     """Drop all cached search results (used by tests)."""
     _SEARCH_CACHE.clear()
+
+
+def reset_search_rate_limiter() -> None:
+    """Drop all recorded rate-limit calls (used by tests)."""
+    _SEARCH_RATE_LIMITER.reset()
 
 
 def create_search_provider(name: str | None = None) -> WebSearchProvider | None:

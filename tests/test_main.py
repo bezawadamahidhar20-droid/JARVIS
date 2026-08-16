@@ -31,10 +31,16 @@ class FakeTTS:
 class FakeSTT:
     vad = None
 
+    def __init__(self, utterances=None):
+        # A queue of utterances to return from listen(); empty = silent.
+        self.utterances = list(utterances or [])
+
     def load(self):
         return True
 
     def listen(self):
+        if self.utterances:
+            return self.utterances.pop(0)
         return None
 
     def unload(self):
@@ -77,12 +83,12 @@ class FakeProvider:
         return "fake provider"
 
 
-def make_jarvis(provider=None, text_mode=True):
+def make_jarvis(provider=None, text_mode=True, stt=None):
     return JARVIS(
         text_mode=text_mode,
         components={
             "mic": FakeMic(),
-            "stt": FakeSTT(),
+            "stt": stt if stt is not None else FakeSTT(),
             "tts": FakeTTS(),
             "memory": ConversationMemory(max_turns=6, max_chars=3000, persist_path=""),
             "provider": provider if provider is not None else FakeProvider(),
@@ -130,6 +136,80 @@ def test_ai_stream_uses_sentences_in_voice_mode():
     jarvis = make_jarvis(provider=provider, text_mode=False)
     assert jarvis.process_input("explain recursion") is True
     assert provider.asked == ["explain recursion"]
+
+
+def test_normal_questions_keep_jarvis_listening():
+    """A normal question must NEVER terminate JARVIS: the loop answers
+    it and keeps listening until an explicit exit phrase."""
+    import threading
+
+    # "explain ..." queries route to the AI provider (the classifier
+    # sends "what is X" to web search, which needs a real API key).
+    provider = FakeProvider(reply="Data size is the amount of information.")
+    jarvis = make_jarvis(
+        provider=provider,
+        text_mode=False,
+        stt=FakeSTT(utterances=["explain data size", "explain recursion", "goodbye"]),
+    )
+    jarvis.running = True  # run() sets this; the test drives the loop directly
+    thread = threading.Thread(
+        target=jarvis.start_listening_loop, daemon=True, name="jarvis-test-loop"
+    )
+    thread.start()
+    thread.join(timeout=30.0)
+    assert not thread.is_alive()
+
+    # BOTH questions were answered before the explicit goodbye.
+    assert provider.asked == ["explain data size", "explain recursion"]
+    assert "Data size is the amount of information." in jarvis.tts.spoken
+    # ...and the goodbye produced the farewell.
+    assert any("Goodbye" in s for s in jarvis.tts.spoken)
+    jarvis.shutdown()
+
+
+def test_shutdown_cancels_running_loop(capsys):
+    """shutdown() must cancel a pending listening loop cleanly — prompt
+    return, no 'Task was destroyed but it is pending!' warning."""
+    import threading
+    import time
+
+    jarvis = make_jarvis(
+        text_mode=False,
+        stt=FakeSTT(utterances=[]),  # silent mic: loop stays in LISTENING
+    )
+    jarvis.running = True  # run() sets this; the test drives the loop directly
+    thread = threading.Thread(
+        target=jarvis.start_listening_loop, daemon=True, name="jarvis-test-loop"
+    )
+    thread.start()
+    # Wait until the loop task is actually registered (poll, so the
+    # test is not sensitive to machine load).
+    deadline = time.monotonic() + 10.0
+    while jarvis._main_task is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert jarvis._main_task is not None, "loop task never registered"
+    jarvis.shutdown()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert "JARVIS offline" in capsys.readouterr().out
+
+
+def test_shutdown_races_loop_startup_does_not_hang():
+    """shutdown() called immediately after starting the loop must not
+    hang the loop thread — the future is recorded before blocking, so
+    cancellation always unblocks it even before the task starts."""
+    import threading
+
+    jarvis = make_jarvis(text_mode=False, stt=FakeSTT(utterances=[]))
+    jarvis.running = True
+    thread = threading.Thread(
+        target=jarvis.start_listening_loop, daemon=True, name="jarvis-test-loop"
+    )
+    thread.start()
+    # Shut down immediately — the loop task may not have started yet.
+    jarvis.shutdown()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
 
 
 def test_provider_offline_speaks_error_and_continues():

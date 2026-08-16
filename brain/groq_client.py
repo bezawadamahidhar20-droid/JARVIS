@@ -22,28 +22,22 @@ import requests
 
 from brain.llm import LLMProvider
 from brain.text_utils import clean_response, split_into_sentences
+from config import groq_config, jarvis_config
 from utils.logger import get_logger
 
 logger = get_logger("groq_client")
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import groq_config, jarvis_config
+__all__ = [
+    "GroqClient",
+]
 
-    GROQ_API_KEY = groq_config.API_KEY
-    GROQ_MODEL = groq_config.MODEL
-    GROQ_TIMEOUT = groq_config.TIMEOUT
-    GROQ_TEMPERATURE = groq_config.TEMPERATURE
-    GROQ_MAX_TOKENS = groq_config.MAX_TOKENS
-    OWNER = jarvis_config.OWNER
-except Exception as e:
-    logger.warning(f"Config load failed, using defaults: {e}")
-    GROQ_API_KEY = ""
-    GROQ_MODEL = "llama-3.3-70b-versatile"
-    GROQ_TIMEOUT = 60
-    GROQ_TEMPERATURE = 0.7
-    GROQ_MAX_TOKENS = 200
-    OWNER = "Sir"
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+GROQ_API_KEY = groq_config.API_KEY
+GROQ_MODEL = groq_config.MODEL
+GROQ_TIMEOUT = groq_config.TIMEOUT
+GROQ_TEMPERATURE = groq_config.TEMPERATURE
+GROQ_MAX_TOKENS = groq_config.MAX_TOKENS
+OWNER = jarvis_config.OWNER
 
 _SYSTEM_PROMPT = (
     f"You are JARVIS, a concise British AI butler. "
@@ -289,3 +283,62 @@ class GroqClient(LLMProvider):
             logger.error("Groq returned an empty streamed response.")
             return None
         return clean_response(full)
+
+    # ── Async streaming ───────────────────────────────────────
+
+    async def ask_stream_async(
+        self,
+        user_input: str,
+        memory=None,
+        context: Optional[str] = None,
+    ):
+        """Async streaming: yield each finished sentence as it generates.
+
+        The requests-based ``ask_stream`` runs on a worker thread; every
+        complete sentence is handed to the event loop through an
+        asyncio.Queue, so TTS can start (and barge-in can cancel) while
+        the rest of the answer is still streaming.
+        """
+        if not user_input or not user_input.strip():
+            return
+        if not self.is_configured():
+            logger.warning("Groq unavailable — no GROQ_API_KEY set.")
+            return
+
+        import asyncio
+        import threading
+
+        queue: "asyncio.Queue" = asyncio.Queue()
+        done = threading.Event()
+
+        def _produce() -> None:
+            def _on_sentence(s: str) -> None:
+                try:
+                    queue.put_nowait(("sentence", s))
+                except Exception:
+                    pass
+
+            try:
+                result = self.ask_stream(
+                    user_input, memory, on_sentence=_on_sentence,
+                    context=context,
+                )
+                queue.put_nowait(("done", result))
+            except Exception as e:  # pragma: no cover - defensive
+                logger.error(f"Groq async stream failed: {e}")
+                queue.put_nowait(("done", None))
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=_produce, name="jarvis-groq-stream", daemon=True
+        ).start()
+
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == "done":
+                    break
+                yield value
+        finally:
+            done.wait(timeout=2.0)

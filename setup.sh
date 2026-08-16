@@ -99,7 +99,7 @@ if [ -f "voices/en_US-lessac-medium.onnx" ]; then
     info "Piper voice already present at voices/en_US-lessac-medium.onnx"
 else
     warn "Piper voice not found. Download it once with:"
-    echo "      python -m piper.download_voices en_US-lessac-medium"
+    echo "      python -m piper.download_voices en_US-lessac-medium --download_dir voices"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────

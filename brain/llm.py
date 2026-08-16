@@ -20,9 +20,17 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
+from config import groq_config, jarvis_config
 from utils.logger import get_logger
 
 logger = get_logger("llm")
+
+__all__ = [
+    "LLMProvider",
+    "FallbackProvider",
+    "stream_sentences_async",
+    "create_provider",
+]
 
 
 class LLMProvider(ABC):
@@ -301,12 +309,7 @@ class FallbackProvider(LLMProvider):
 
 def _groq_fallback() -> "LLMProvider | None":
     """Build a GroqClient only when an API key is configured."""
-    try:
-        from config import groq_config
-
-        if not (groq_config.API_KEY or "").strip():
-            return None
-    except Exception:
+    if not (groq_config.API_KEY or "").strip():
         return None
     try:
         from brain.groq_client import GroqClient
@@ -332,12 +335,7 @@ def create_provider(name: Optional[str] = None) -> LLMProvider:
     falls back to a provider-less run (local commands only).
     """
     if name is None:
-        try:
-            from config import jarvis_config
-
-            name = jarvis_config.AI_PROVIDER
-        except Exception:
-            name = "ollama"
+        name = jarvis_config.AI_PROVIDER
 
     name = (name or "ollama").strip().lower()
 

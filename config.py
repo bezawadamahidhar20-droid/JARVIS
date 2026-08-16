@@ -217,6 +217,11 @@ class SearchConfig:
     CACHE_TTL: int = _env_int("SEARCH_CACHE_TTL", 300)
     # Upper bound on cached queries (oldest evicted first).
     CACHE_MAX_ENTRIES: int = _env_int("SEARCH_CACHE_MAX_ENTRIES", 50)
+    # Sliding-window rate limit on external API calls (free tiers are
+    # tiny: Tavily 1000/month). N calls are allowed per WINDOW seconds;
+    # 0 disables the limiter.
+    RATE_LIMIT: int = _env_int("SEARCH_RATE_LIMIT", 10)
+    RATE_WINDOW: float = _env_float("SEARCH_RATE_WINDOW", 60.0)
 
 
 class MemoryConfig:
@@ -365,10 +370,10 @@ def validate_config() -> list[dict]:
             "JARVIS_MODEL_MODE",
             f"'{c.MODEL_MODE}' is not supported (use fast or quality).",
         ))
-    if c.MAX_INPUT_CHARS < 1:
+    if c.MAX_INPUT_CHARS <= 0:
         problems.append(_problem(
             "JARVIS_MAX_INPUT_CHARS",
-            "must be at least 1 character.",
+            "must be > 0 characters.",
             fatal=True,
         ))
     if c.CONFIRMATION_TIMEOUT < 0:
@@ -405,9 +410,9 @@ def validate_config() -> list[dict]:
         problems.append(_problem(
             "OLLAMA_TIMEOUT", "must be > 0 seconds.", fatal=True,
         ))
-    if not 0.0 <= o.TEMPERATURE <= 2.0:
+    if not 0.0 <= o.TEMPERATURE <= 1.0:
         problems.append(_problem(
-            "OLLAMA_TEMPERATURE", "must be between 0.0 and 2.0.",
+            "OLLAMA_TEMPERATURE", "must be between 0.0 and 1.0.",
             fatal=True,
         ))
     if o.NUM_PREDICT <= 0:
@@ -465,9 +470,9 @@ def validate_config() -> list[dict]:
         ))
 
     s = stt_config
-    if not 8000 <= s.SAMPLE_RATE <= 96000:
+    if not 8000 <= s.SAMPLE_RATE <= 48000:
         problems.append(_problem(
-            "SAMPLE_RATE", "must be between 8000 and 96000 Hz.",
+            "SAMPLE_RATE", "must be between 8000 and 48000 Hz.",
             fatal=True,
         ))
     if s.TIMEOUT <= 0:
@@ -587,6 +592,17 @@ def validate_config() -> list[dict]:
     if q.CACHE_MAX_ENTRIES < 1:
         problems.append(_problem(
             "SEARCH_CACHE_MAX_ENTRIES", "must be >= 1.",
+            fatal=True,
+        ))
+    if q.RATE_LIMIT < 0:
+        problems.append(_problem(
+            "SEARCH_RATE_LIMIT", "must be >= 0 (0 disables rate limiting).",
+            fatal=True,
+        ))
+    if q.RATE_WINDOW <= 0:
+        problems.append(_problem(
+            "SEARCH_RATE_WINDOW", "must be > 0 seconds.",
+            fatal=True,
         ))
 
     # ── Logging ────────────────────────────────────────────────

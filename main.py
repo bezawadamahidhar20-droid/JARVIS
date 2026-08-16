@@ -21,6 +21,7 @@ friendly "offline" message is spoken for AI questions.
 """
 
 import asyncio
+import concurrent.futures
 import inspect
 import re
 import sys
@@ -178,6 +179,12 @@ class JARVIS:
         self._loop_thread.start()
 
         self.running = False
+        # The concurrent.futures.Future wrapping the running listening
+        # loop (set by start_listening_loop()), plus the asyncio task
+        # itself (registered by astart_listening_loop()). shutdown()
+        # cancels the task so it is never abandoned mid-flight.
+        self._main_future = None
+        self._main_task: asyncio.Task | None = None
 
         # Active model mode (fast/quality). Starts from .env and can be
         # changed at runtime with a voice command ("switch to fast
@@ -209,7 +216,70 @@ class JARVIS:
         if self._loop.is_closed():
             return asyncio.run(coro)
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
+        try:
+            return future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            # Only happens when shutdown() cancels the running main
+            # loop — treat it as a normal stop, never a crash.
+            return None
+
+    def _cancel_main_loop(self) -> None:
+        """Cancel the running listening-loop task and wait for it to stop.
+
+        Called at the start of shutdown() (and by run() on Ctrl+C) so a
+        pending loop task is never abandoned — abandoning it used to
+        leak the in-flight AI stream (sentences kept being spoken over
+        the shutdown) and raise "Task was destroyed but it is pending!"
+        when the loop closed. Idempotent: no-op once the task has
+        finished or the loop is already closed.
+        """
+        task = self._main_task
+        future = self._main_future
+        if (task is None and future is None) or self._loop.is_closed():
+            return
+
+        # Cancel the asyncio task and WAIT for it to fully unwind
+        # before the loop is stopped. Cancelling alone is not enough:
+        # if the loop closes while the task is still mid-cancellation,
+        # asyncio logs "Task was destroyed but it is pending!".
+        if task is not None and not task.done():
+            unwound = concurrent.futures.Future()
+
+            def _cancel_and_wait() -> None:
+                def _on_done(t: asyncio.Task) -> None:
+                    if unwound.cancelled():
+                        t.cancel()
+                    else:
+                        unwound.set_result(None)
+
+                task.add_done_callback(_on_done)
+                task.cancel()
+
+            try:
+                self._loop.call_soon_threadsafe(_cancel_and_wait)
+            except Exception as e:
+                logger.warning(f"Could not cancel the main loop task: {e}")
+            try:
+                # Give the task a moment to unwind (cancelling the AI
+                # stream can wait up to ~2s for its worker to abort).
+                unwound.result(timeout=5.0)
+            except (
+                asyncio.CancelledError,
+                concurrent.futures.CancelledError,
+                TimeoutError,
+            ):
+                pass  # expected: the task was cancelled mid-flight
+            except Exception as e:
+                logger.warning(f"Ignoring error while stopping the main loop: {e}")
+
+        if future is not None and not future.done():
+            try:
+                # Cancelling the concurrent future also cancels the
+                # asyncio task it wraps — even if that task has not
+                # started running yet (shutdown racing loop startup).
+                future.cancel()
+            except Exception as e:
+                logger.warning(f"Could not cancel the main loop future: {e}")
 
     # ── Provider helpers ──────────────────────────────────────
 
@@ -402,6 +472,7 @@ class JARVIS:
     def speak(self, text: str) -> None:
         """Speak text via TTS (non-blocking)."""
         if text and text.strip():
+            logger.info("[STATE] SPEAKING")
             self._ui_state("speaking")
             self.tts.speak(text)
 
@@ -883,6 +954,7 @@ class JARVIS:
 
         # Route the input to correct handler
         intent, cleaned = self.router.route(user_input)
+        logger.info("[STATE] PROCESSING")
 
         if intent == Intent.FAST_RESPONSE:
             # Instant canned reply — no AI round-trip needed.
@@ -890,6 +962,7 @@ class JARVIS:
             return True
 
         if intent == Intent.EXIT:
+            logger.info("[SHUTDOWN] reason=goodbye")
             # Farewell speech is blocking I/O — offload it so the loop
             # stays responsive until shutdown.
             await asyncio.to_thread(
@@ -1036,11 +1109,62 @@ class JARVIS:
 
     def start_listening_loop(self) -> None:
         """Sync façade: run the async listen → transcribe → route →
-        respond loop on the event loop."""
-        self._run_coro(self.astart_listening_loop())
+        respond loop on the event loop. The future is recorded BEFORE
+        blocking so shutdown() can cancel a pending loop cleanly even
+        when it races the loop's startup."""
+        if self._loop.is_closed():
+            asyncio.run(self.astart_listening_loop())
+            return
+        self._main_future = concurrent.futures.Future()
+
+        def _launch() -> None:
+            # Runs on the loop thread. Creating the task and registering
+            # it happen in one step, so shutdown() can always find and
+            # cancel it — there is no window where a live task is
+            # unreachable (that gap used to strand the loop thread on
+            # a never-completing future).
+            if self._main_future.done():
+                # shutdown() already cancelled the future while this
+                # launch was queued — never create the task at all
+                # (a cancelled-but-never-stepped task would be left
+                # pending when the loop closes).
+                return
+            task = asyncio.ensure_future(self.astart_listening_loop())
+            self._main_task = task
+
+            def _chain(t: asyncio.Task) -> None:
+                if self._main_future.done():
+                    t.cancel()
+                    return
+                if t.cancelled():
+                    self._main_future.cancel()
+                else:
+                    exc = t.exception()
+                    if exc is not None:
+                        self._main_future.set_exception(exc)
+                    else:
+                        self._main_future.set_result(t.result())
+
+            task.add_done_callback(_chain)
+
+        try:
+            self._loop.call_soon_threadsafe(_launch)
+        except RuntimeError:
+            # The loop was closed between the check and the call — run
+            # on a fresh loop rather than stranding the coroutine.
+            asyncio.run(self.astart_listening_loop())
+            return
+        try:
+            self._main_future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            # Only happens when shutdown() cancels the running main
+            # loop — treat it as a normal stop, never a crash.
+            return None
 
     async def astart_listening_loop(self) -> None:
         """The listen → transcribe → route → respond loop (async)."""
+        # Register this task so shutdown() can cancel it cleanly.
+        self._main_task = asyncio.current_task()
         print("\n=============================================")
         if self.text_mode:
             print("  JARVIS — TEXT MODE")
@@ -1097,6 +1221,7 @@ class JARVIS:
                     # enabled and the optional detector is available).
                     await self._await_wake_word()
 
+                    logger.info("[STATE] LISTENING")
                     self._ui_state("listening")
                     t0 = time.perf_counter()
                     user_input = await self._listen_voice()
@@ -1127,14 +1252,16 @@ class JARVIS:
                     f"[timing] total {turn['process']:.1f}s "
                     f"(process)"
                 )
+                logger.info("[STATE] RETURNING_TO_LISTENING")
                 await asyncio.sleep(0.1)
 
             except KeyboardInterrupt:
-                print("\n[Interrupted]")
-                await asyncio.to_thread(
-                    self.speak_blocking,
-                    f"Shutting down. "
-                    f"Goodbye, {jarvis_config.OWNER}.",
+                # A real Ctrl+C lands on the main thread (inside
+                # future.result()), so this branch only fires for an
+                # interrupt delivered to the loop thread. Never speak
+                # here — run() handles the farewell exactly once.
+                logger.info(
+                    "[SHUTDOWN] reason=keyboard_interrupt (loop thread)"
                 )
                 self.running = False
                 break
@@ -1149,6 +1276,10 @@ class JARVIS:
     def shutdown(self) -> None:
         """Release resources and exit cleanly."""
         self.running = False
+        # Stop the main loop task FIRST — a pending task would keep the
+        # AI stream / TTS alive while we tear down and would be
+        # destroyed pending on loop close.
+        self._cancel_main_loop()
         try:
             self.tts.stop()
         except Exception:
@@ -1185,14 +1316,24 @@ class JARVIS:
             self.start_listening_loop()
         except KeyboardInterrupt:
             # Ctrl+C lands on this (main) thread while the loop blocks
-            # on the listening coroutine — handle it gracefully.
-            print("\n[Interrupted]")
+            # on the listening coroutine. Cancel the loop task and cut
+            # TTS FIRST so the farewell never interleaves with a
+            # still-streaming answer, then speak it once.
+            logger.info("[SHUTDOWN] reason=keyboard_interrupt")
+            print("\n[Shutdown requested]")
+            self._cancel_main_loop()
+            try:
+                self.tts.stop()
+            except Exception:
+                pass
             try:
                 self.speak_blocking(
                     f"Shutting down. "
                     f"Goodbye, {jarvis_config.OWNER}."
                 )
-            except Exception:
+            except BaseException:
+                # A second Ctrl+C while the farewell is playing must
+                # not abort shutdown with a nested traceback.
                 pass
         finally:
             self.shutdown()

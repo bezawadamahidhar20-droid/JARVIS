@@ -29,39 +29,30 @@ import threading
 import numpy as np
 import sounddevice as sd
 
+from config import stt_config, vad_config
 from utils.logger import get_logger
 
 logger = get_logger("vad")
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import stt_config, vad_config
+__all__ = [
+    "AdaptiveVAD",
+    "rms",
+    "derive_threshold",
+]
 
-    SAMPLE_RATE = stt_config.SAMPLE_RATE
-    INPUT_DEVICE = stt_config.INPUT_DEVICE
-    TIMEOUT = stt_config.TIMEOUT
-    PHRASE_LIMIT = stt_config.PHRASE_LIMIT
-    CALIBRATE_SECONDS = vad_config.CALIBRATE_SECONDS
-    THRESHOLD_MULTIPLIER = vad_config.THRESHOLD_MULTIPLIER
-    MIN_THRESHOLD = vad_config.MIN_THRESHOLD
-    FIXED_THRESHOLD = vad_config.FIXED_THRESHOLD
-    SILENCE_DURATION = vad_config.SILENCE_DURATION
-    CHUNK_DURATION = vad_config.CHUNK_DURATION
-    MIN_SPEECH_CHUNKS = vad_config.MIN_SPEECH_CHUNKS
-    VERBOSE = vad_config.VERBOSE
-except Exception:
-    SAMPLE_RATE = 16000
-    INPUT_DEVICE = None
-    TIMEOUT = 5
-    PHRASE_LIMIT = 10
-    CALIBRATE_SECONDS = 0.6
-    THRESHOLD_MULTIPLIER = 3.0
-    MIN_THRESHOLD = 120.0
-    FIXED_THRESHOLD = 500.0
-    SILENCE_DURATION = 0.7
-    CHUNK_DURATION = 0.05
-    MIN_SPEECH_CHUNKS = 3
-    VERBOSE = True
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+SAMPLE_RATE = stt_config.SAMPLE_RATE
+INPUT_DEVICE = stt_config.INPUT_DEVICE
+TIMEOUT = stt_config.TIMEOUT
+PHRASE_LIMIT = stt_config.PHRASE_LIMIT
+CALIBRATE_SECONDS = vad_config.CALIBRATE_SECONDS
+THRESHOLD_MULTIPLIER = vad_config.THRESHOLD_MULTIPLIER
+MIN_THRESHOLD = vad_config.MIN_THRESHOLD
+FIXED_THRESHOLD = vad_config.FIXED_THRESHOLD
+SILENCE_DURATION = vad_config.SILENCE_DURATION
+CHUNK_DURATION = vad_config.CHUNK_DURATION
+MIN_SPEECH_CHUNKS = vad_config.MIN_SPEECH_CHUNKS
+VERBOSE = vad_config.VERBOSE
 
 
 def rms(chunk: np.ndarray) -> float:

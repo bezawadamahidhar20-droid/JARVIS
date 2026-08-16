@@ -26,9 +26,20 @@ data (see AI_MODE in .env: auto | local | web).
 import re
 from typing import Tuple, List, Pattern
 
+from config import jarvis_config
 from utils.logger import get_logger
 
 logger = get_logger("router")
+
+__all__ = [
+    "Intent",
+    "IntentRouter",
+    "sanitize_input",
+    "validate_input",
+    "normalize_wake_name",
+    "parse_model_mode_request",
+    "FAST_RESPONSES",
+]
 
 
 class Intent:
@@ -47,15 +58,9 @@ class Intent:
 # ── Fast responses ────────────────────────────────────────────
 # Greetings answered instantly from this local table instead of
 # a full AI round-trip. Keys are normalized (lowercase, no punctuation).
-try:
-    from config import jarvis_config
-    OWNER = jarvis_config.OWNER
-    ENABLE_FAST_RESPONSES = jarvis_config.ENABLE_FAST_RESPONSES
-    MAX_INPUT_CHARS = jarvis_config.MAX_INPUT_CHARS
-except Exception:
-    OWNER = "Sir"
-    ENABLE_FAST_RESPONSES = True
-    MAX_INPUT_CHARS = 500
+OWNER = jarvis_config.OWNER
+ENABLE_FAST_RESPONSES = jarvis_config.ENABLE_FAST_RESPONSES
+MAX_INPUT_CHARS = jarvis_config.MAX_INPUT_CHARS
 
 
 # ── Input sanitisation ────────────────────────────────────────
@@ -141,13 +146,22 @@ FAST_RESPONSES: dict = {
 
 # ── Wake-name normalization ───────────────────────────────────
 # Whisper sometimes hears the assistant's name as a near-homophone
-# ("jervis", "lajav", "lajad", ...). We normalize those variants to
-# "jarvis" ONLY when they appear in *address position* (start of the
-# utterance, or right after a comma / pause word like "so"/"hey").
-# Ordinary sentences are never altered, and the raw transcription is
-# kept in the debug log.
+# ("jervis", "lajav", "lajad", "jarves", "gervis", ...). We normalize
+# those variants to "jarvis" ONLY when they appear in *address position*
+# (start of the utterance, or right after a comma / pause word like
+# "so"/"hey"). Ordinary sentences are never altered, and the raw
+# transcription is kept in the debug log.
+_WAKE_VARIANTS = (
+    # existing variants
+    "jervis", "lajav", "lajad", "jarivs", "jerivs",
+    # expanded: common Whisper misrecognitions
+    "javas", "jarves", "jarvus", "jarfis", "gervis", "garvis",
+    "djarvis", "charvis", "jarvas", "jarvs", "jarvi", "jervas",
+    "jarbis", "jarvisa", "jarwis", "jarivis", "jarvish",
+    "javris", "jerfis", "jervas", "djarvus", "charlvis",
+)
 _WAKE_VARIANTS_RE = re.compile(
-    r"\b(jervis|lajav|lajad|jarivs|jerivs)\b",
+    r"\b(" + "|".join(re.escape(v) for v in _WAKE_VARIANTS) + r")\b",
     re.IGNORECASE,
 )
 _PAUSE_WORDS = (

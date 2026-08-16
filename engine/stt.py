@@ -19,34 +19,26 @@ import time
 
 import numpy as np
 
+from config import jarvis_config, stt_config, whisper_config
 from engine.vad import AdaptiveVAD
 from utils.logger import get_logger
 
 logger = get_logger("stt")
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import jarvis_config, stt_config, whisper_config
+__all__ = [
+    "STTEngine",
+]
 
-    SAMPLE_RATE = stt_config.SAMPLE_RATE
-    WHISPER_MODEL = whisper_config.MODEL
-    WHISPER_COMPUTE_TYPE = whisper_config.COMPUTE_TYPE
-    WHISPER_DEVICE = whisper_config.DEVICE
-    WHISPER_LANGUAGE = whisper_config.LANGUAGE
-    WHISPER_BEAM_SIZE = whisper_config.BEAM_SIZE
-    STT_STREAM = jarvis_config.STT_STREAM
-    ENABLE_WAKE_WORD = jarvis_config.ENABLE_WAKE_WORD
-    WAKE_WORD = jarvis_config.WAKE_WORD
-except Exception:
-    SAMPLE_RATE = 16000
-    WHISPER_MODEL = "base"
-    WHISPER_COMPUTE_TYPE = "int8"
-    WHISPER_DEVICE = "auto"
-    WHISPER_LANGUAGE = "en"
-    WHISPER_BEAM_SIZE = 1
-    STT_STREAM = False
-    ENABLE_WAKE_WORD = False
-    WAKE_WORD = "hey jarvis"
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+SAMPLE_RATE = stt_config.SAMPLE_RATE
+WHISPER_MODEL = whisper_config.MODEL
+WHISPER_COMPUTE_TYPE = whisper_config.COMPUTE_TYPE
+WHISPER_DEVICE = whisper_config.DEVICE
+WHISPER_LANGUAGE = whisper_config.LANGUAGE
+WHISPER_BEAM_SIZE = whisper_config.BEAM_SIZE
+STT_STREAM = jarvis_config.STT_STREAM
+ENABLE_WAKE_WORD = jarvis_config.ENABLE_WAKE_WORD
+WAKE_WORD = jarvis_config.WAKE_WORD
 
 
 # Compute type used when CUDA is selected but the config still says the

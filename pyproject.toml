@@ -5,30 +5,38 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarvis-assistant"
 version = "2.0.0"
-description = "JARVIS — a private, local AI voice assistant for Windows"
+description = "JARVIS — a private, local AI voice assistant"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-# Mirrors requirements.txt (pinned). numpy is a range because a single
-# version cannot span the supported Python range (1.26.x covers 3.10-3.12;
-# 2.2.x supports 3.10; 2.5.x supports 3.12-3.14).
+# ── Single source of truth for runtime dependencies ─────────────────────────
+# requirements.txt is GENERATED from this table (keep them in sync):
+#     python -c "import tomllib,re;d=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies'];open('requirements.txt','w').write('# Generated from pyproject.toml — do not edit by hand.\n'+'\n'.join(d)+'\n')"
+#
+# Versions are pinned to the known-good set that is installed in .venv and
+# verified by the test suite (numpy 2.5.2, faster-whisper 1.2.1, piper-tts
+# 1.6.1, sounddevice 0.5.5, ...). numpy is a range because a single version
+# cannot span the supported Python range (2.2.x supports 3.10; 2.5.x
+# supports 3.12-3.14) — numpy 2.x works because the audio pipeline only
+# uses stable dtype APIs (np.float32 / np.int16, never np.float/np.int).
 dependencies = [
-    "faster-whisper==1.1.0",
-    "piper-tts==1.2.0",
-    "sounddevice==0.5.0",
-    "numpy>=1.26.0,<2.0.0",
-    "requests==2.32.3",
-    "python-dotenv==1.0.1",
+    "faster-whisper==1.2.1",
+    "piper-tts==1.6.1",
+    "sounddevice==0.5.5",
+    "numpy>=2.2,<2.6",
+    "requests==2.34.2",
+    "python-dotenv==1.2.2",
     "pyautogui==0.9.54",
-    "pillow==10.4.0",
-    "pycaw==20240210",
-    "comtypes==1.4.14",
-    "rich==13.7.1",
-    "SpeechRecognition==3.10.4",
-    "pyttsx3==2.90",
+    "pillow==12.3.0",
+    "pycaw==20251023",
+    "comtypes==1.4.16",
+    "rich==15.0.0",
 ]
 
 [project.optional-dependencies]
+# TTS_ENGINE=pyttsx3 fallback (Windows SAPI5) — optional; Piper is the
+# default and needs none of this. Install with:  pip install -e .[tts]
+tts = ["pyttsx3==2.99"]
 dev = ["pytest==9.1.1", "ruff==0.16.3", "hypothesis>=6.100,<7"]
 gui = ["PySide6>=6.6", "PyOpenGL>=3.1", "psutil>=5.9"]
 

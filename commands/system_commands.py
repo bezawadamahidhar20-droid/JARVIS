@@ -8,10 +8,16 @@ instead of crashing JARVIS.
 Security: every executable action is a *fixed, registered* handler. Nothing
 here ever evaluates user text as a command — the target is resolved against
 the safe lookup tables below (WEBSITES / APPS / FOLDERS).
+
+Cross-platform: the README promises Linux/macOS/WSL support, so all
+Windows-only APIs (ctypes.windll, os.startfile, pycaw COM bindings,
+shutdown.exe) are guarded by IS_WINDOWS and given POSIX equivalents
+(xdg-open, pactl, xdg-user-dir, loginctl, systemctl, osascript).
 """
 
 import difflib
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -20,55 +26,140 @@ from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 
+from config import jarvis_config
 from utils.logger import get_logger
 
 logger = get_logger("system_commands")
 
-try:
-    from config import jarvis_config
+# ── Platform detection (used to guard every OS-specific call) ────────────────
+_PLATFORM = platform.system()
+IS_WINDOWS = _PLATFORM == "Windows"
+IS_LINUX = _PLATFORM == "Linux"
+IS_MACOS = _PLATFORM == "Darwin"
 
-    OWNER = jarvis_config.OWNER
-except Exception:
-    OWNER = "Sir"
+
+def _platform_name() -> str:
+    """Human name of the current OS for "not supported" messages."""
+    if IS_WINDOWS:
+        return "Windows"
+    if IS_LINUX:
+        return "Linux"
+    if IS_MACOS:
+        return "macOS"
+    return _PLATFORM
+
+
+OWNER = jarvis_config.OWNER
 
 
 # ── Helpers (defined before the lookup tables that call them) ─────────────────
 
 def _chrome_path() -> str:
-    """Return the path to chrome.exe if installed in the usual spots."""
-    candidates = (
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    )
+    """Return the path to the Chrome/Chromium binary if installed in the
+    usual spots for this platform, or a bare command name as a last resort
+    (subprocess then fails loudly with a clear error)."""
+    if IS_WINDOWS:
+        candidates = (
+            os.path.join(
+                os.environ.get("LOCALAPPDATA", ""),
+                "Google", "Chrome", "Application", "chrome.exe",
+            ),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        )
+        fallback = "chrome.exe"
+    elif IS_LINUX:
+        candidates = (
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/opt/google/chrome/chrome",
+        )
+        fallback = "google-chrome"
+    elif IS_MACOS:
+        candidates = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )
+        fallback = "open -a 'Google Chrome'"
+    else:
+        candidates = ()
+        fallback = "chrome"
     for path in candidates:
-        if os.path.isfile(path):
+        if path and os.path.isfile(path):
             return path
-    return "chrome.exe"  # let subprocess fail loudly with a clear error
+    return fallback
+
+
+class _LazyPath:
+    """Defers a filesystem lookup until the value is first used.
+
+    ``APPS["chrome"]`` is a _LazyPath instead of a resolved path, so the
+    import-time filesystem I/O of _chrome_path() is eliminated — JARVIS
+    starts fast even on machines where Chrome lives in an unusual spot.
+    """
+
+    __slots__ = ("_fn", "_val")
+
+    def __init__(self, fn):
+        self._fn = fn
+        self._val = None
+
+    def resolve(self) -> str:
+        if self._val is None:
+            self._val = self._fn()
+        return self._val
+
+    def __str__(self) -> str:
+        return self.resolve()
+
+    def __repr__(self) -> str:
+        return f"_LazyPath({self.resolve()!r})"
+
+    def __fspath__(self) -> str:
+        return self.resolve()
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _LazyPath):
+            return self.resolve() == other.resolve()
+        if isinstance(other, str):
+            return self.resolve() == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.resolve())
 
 
 def _find_exe(exe: str) -> bool:
-    """True if *exe* is resolvable on PATH or in the usual install spots."""
+    """True if *exe* is resolvable on PATH or in its known install spots.
+
+    Targeted lookups only — never os.walk() on Program Files (that scans
+    50k+ files and stalls startup by seconds).
+    """
     if shutil.which(exe):
         return True
-    program_files = [
-        os.environ.get("ProgramFiles", r"C:\Program Files"),
-        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    base_dirs = [
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
         os.environ.get("LOCALAPPDATA", ""),
+        "/usr/bin",
+        "/usr/local/bin",
+        "/Applications",
     ]
-    for base in program_files:
+    for base in base_dirs:
         if not base:
             continue
-        for root, _dirs, files in os.walk(base):
-            if exe in files:
-                return True
+        if os.path.isfile(os.path.join(base, exe)):
+            return True
     return False
 
 
 def _startfile(path: str) -> None:
     """Open a file/folder/URI with the OS default handler."""
-    if os.name == "nt":
+    if IS_WINDOWS:
         os.startfile(path)  # type: ignore[attr-defined]
+    elif IS_MACOS:
+        subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
 
@@ -102,32 +193,95 @@ WEBSITES: MappingProxyType = MappingProxyType({
 # Spoken name -> how to launch it. Frozen — see WEBSITES.
 # A value ending in ".exe" is launched via PATH lookup (subprocess.Popen);
 # anything else is treated as a shell URI for os.startfile (ms-settings: etc).
-APPS: MappingProxyType = MappingProxyType({
-    "notepad": "notepad.exe",
-    "calculator": "calc.exe",
-    "calc": "calc.exe",
-    "paint": "mspaint.exe",
-    "cmd": "cmd.exe",
-    "command prompt": "cmd.exe",
-    "terminal": "cmd.exe",
-    "powershell": "powershell.exe",
-    "file explorer": "explorer.exe",
-    "explorer": "explorer.exe",
-    "task manager": "taskmgr.exe",
-    "snipping tool": "snippingtool.exe",
-    "settings": "ms-settings:",
-    "control panel": "control.exe",
-    "edge": "msedge.exe",
-    "browser": _chrome_path(),
-    "chrome": _chrome_path(),
-    "word": "winword.exe",
-    "excel": "excel.exe",
-    "powerpoint": "powerpnt.exe",
-    "vscode": "code.exe",
-    "visual studio code": "code.exe",
-    "vs code": "code.exe",
-    "photos": "ms-photos:",
-})
+# "chrome"/"browser" are _LazyPath: resolved only when actually opened.
+if IS_WINDOWS:
+    _APPS_DATA: dict = {
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "calc": "calc.exe",
+        "paint": "mspaint.exe",
+        "cmd": "cmd.exe",
+        "command prompt": "cmd.exe",
+        "terminal": "cmd.exe",
+        "powershell": "powershell.exe",
+        "file explorer": "explorer.exe",
+        "explorer": "explorer.exe",
+        "task manager": "taskmgr.exe",
+        "snipping tool": "snippingtool.exe",
+        "settings": "ms-settings:",
+        "control panel": "control.exe",
+        "edge": "msedge.exe",
+        "browser": _LazyPath(_chrome_path),
+        "chrome": _LazyPath(_chrome_path),
+        "word": "winword.exe",
+        "excel": "excel.exe",
+        "powerpoint": "powerpnt.exe",
+        "vscode": "code.exe",
+        "visual studio code": "code.exe",
+        "vs code": "code.exe",
+        "photos": "ms-photos:",
+    }
+elif IS_LINUX:
+    _APPS_DATA = {
+        "notepad": "gedit",
+        "calculator": "gnome-calculator",
+        "calc": "gnome-calculator",
+        "paint": "pinta",
+        "cmd": "x-terminal-emulator",
+        "command prompt": "x-terminal-emulator",
+        "terminal": "x-terminal-emulator",
+        "powershell": "pwsh",
+        "file explorer": "nautilus",
+        "explorer": "nautilus",
+        "task manager": "gnome-system-monitor",
+        "snipping tool": "gnome-screenshot",
+        "settings": "gnome-control-center",
+        "control panel": "gnome-control-center",
+        "edge": "microsoft-edge",
+        "browser": _LazyPath(_chrome_path),
+        "chrome": _LazyPath(_chrome_path),
+        "word": "libreoffice",
+        "excel": "libreoffice",
+        "powerpoint": "libreoffice",
+        "vscode": "code",
+        "visual studio code": "code",
+        "vs code": "code",
+        "photos": "eog",
+    }
+elif IS_MACOS:
+    _APPS_DATA = {
+        "notepad": "TextEdit",
+        "calculator": "Calculator",
+        "calc": "Calculator",
+        "paint": "Preview",
+        "cmd": "Terminal",
+        "command prompt": "Terminal",
+        "terminal": "Terminal",
+        "powershell": "pwsh",
+        "file explorer": "Finder",
+        "explorer": "Finder",
+        "task manager": "Activity Monitor",
+        "snipping tool": "Screenshot",
+        "settings": "System Settings",
+        "control panel": "System Settings",
+        "edge": "Microsoft Edge",
+        "browser": _LazyPath(_chrome_path),
+        "chrome": _LazyPath(_chrome_path),
+        "word": "Microsoft Word",
+        "excel": "Microsoft Excel",
+        "powerpoint": "Microsoft PowerPoint",
+        "vscode": "Visual Studio Code",
+        "visual studio code": "Visual Studio Code",
+        "vs code": "Visual Studio Code",
+        "photos": "Photos",
+    }
+else:
+    _APPS_DATA = {
+        "browser": _LazyPath(_chrome_path),
+        "chrome": _LazyPath(_chrome_path),
+    }
+
+APPS: MappingProxyType = MappingProxyType(_APPS_DATA)
 
 # ── Fuzzy matching (speech-recognition misspellings) ────────────────────────
 # "open chrom" should resolve to Chrome; "open youtbe" to YouTube. We only
@@ -151,8 +305,7 @@ def fuzzy_match_target(target: str, registry: dict, cutoff: float = _FUZZY_CUTOF
     matches = difflib.get_close_matches(t, registry.keys(), n=1, cutoff=cutoff)
     return matches[0] if matches else None
 
-# Spoken name -> Windows known-folder key (resolved with SHGetKnownFolderPath).
-# Frozen — see WEBSITES.
+# Spoken name -> known-folder key. Frozen — see WEBSITES.
 FOLDERS: MappingProxyType = MappingProxyType({
     "downloads": "downloads",
     "documents": "documents",
@@ -177,7 +330,7 @@ _OPEN_RE = re.compile(
 )
 
 
-# ── Windows known folders ─────────────────────────────────────────────────────
+# ── Known folders (Windows SHGetKnownFolderPath / xdg-user-dir) ───────────────
 
 _KNOWN_FOLDER_GUIDS = {
     "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
@@ -197,41 +350,91 @@ _FALLBACK_DIRS = {
     "music": "Music",
 }
 
+# Linux user-dir keys for xdg-user-dir.
+_XDG_USER_DIRS = {
+    "downloads": "DOWNLOAD",
+    "documents": "DOCUMENTS",
+    "desktop": "DESKTOP",
+    "pictures": "PICTURES",
+    "videos": "VIDEOS",
+    "music": "MUSIC",
+}
+
+# macOS folder names under the user's home directory.
+_MAC_FOLDER_DIRS = {
+    "downloads": "Downloads",
+    "documents": "Documents",
+    "desktop": "Desktop",
+    "pictures": "Pictures",
+    "videos": "Movies",
+    "music": "Music",
+}
+
 
 def _known_folder_path(key: str) -> Path | None:
-    """Resolve a Windows known folder (Downloads, Documents, ...) via
-    SHGetKnownFolderPath. Returns None on any failure (e.g. non-Windows).
+    """Resolve a platform known folder (Downloads, Documents, ...).
+
+    Windows: SHGetKnownFolderPath. Linux: xdg-user-dir. macOS: fixed
+    names under the home directory. Returns None on any failure.
     """
-    guid_str = _KNOWN_FOLDER_GUIDS.get(key)
-    if not guid_str or os.name != "nt":
+    if IS_WINDOWS:
+        guid_str = _KNOWN_FOLDER_GUIDS.get(key)
+        if not guid_str:
+            return None
+        try:
+            import ctypes
+            import uuid
+            from ctypes import wintypes
+
+            g = uuid.UUID(guid_str.strip("{}"))
+            guid = wintypes.GUID()
+            guid.Data1 = g.time_low
+            guid.Data2 = g.time_mid
+            guid.Data3 = g.time_hi_version
+            guid.Data4 = (ctypes.c_ubyte * 8)(*g.bytes[8:])
+
+            p = ctypes.c_wchar_p()
+            hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(guid), 0, None, ctypes.byref(p)
+            )
+            if hr == 0 and p.value:
+                path = str(p.value)
+                ctypes.windll.ole32.CoTaskMemFree(p)
+                return Path(path)
+        except Exception as e:
+            logger.debug(f"Known folder lookup failed for {key}: {e}")
         return None
-    try:
-        import ctypes
-        import uuid
-        from ctypes import wintypes
 
-        g = uuid.UUID(guid_str.strip("{}"))
-        guid = wintypes.GUID()
-        guid.Data1 = g.time_low
-        guid.Data2 = g.time_mid
-        guid.Data3 = g.time_hi_version
-        guid.Data4 = (ctypes.c_ubyte * 8)(*g.bytes[8:])
+    if IS_LINUX:
+        xdg_key = _XDG_USER_DIRS.get(key)
+        if not xdg_key:
+            return None
+        try:
+            out = subprocess.run(
+                ["xdg-user-dir", xdg_key],
+                capture_output=True, text=True, timeout=5,
+            )
+            path = out.stdout.strip() if out.stdout else ""
+            if path and Path(path).is_dir():
+                return Path(path)
+        except Exception as e:
+            logger.debug(f"xdg-user-dir lookup failed for {key}: {e}")
+        return None
 
-        p = ctypes.c_wchar_p()
-        hr = ctypes.windll.shell32.SHGetKnownFolderPath(
-            ctypes.byref(guid), 0, None, ctypes.byref(p)
-        )
-        if hr == 0 and p.value:
-            path = str(p.value)
-            ctypes.windll.ole32.CoTaskMemFree(p)
-            return Path(path)
-    except Exception as e:
-        logger.debug(f"Known folder lookup failed for {key}: {e}")
+    if IS_MACOS:
+        name = _MAC_FOLDER_DIRS.get(key)
+        if not name:
+            return None
+        path = Path.home() / name
+        if path.is_dir():
+            return path
+        return None
+
     return None
 
 
 def _folder_path(key: str) -> Path:
-    """Best-effort path for a known folder (Windows API, then home dir)."""
+    """Best-effort path for a known folder (platform API, then home dir)."""
     known = _known_folder_path(key)
     if known:
         return known
@@ -254,28 +457,29 @@ def _system_metrics() -> dict:
         pass
 
     # Fallbacks without psutil.
-    try:
-        import ctypes
+    if IS_WINDOWS:
+        try:
+            import ctypes
 
-        class MEMORYSTATUSEX(ctypes.Structure):  # noqa: N801
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
+            class MEMORYSTATUSEX(ctypes.Structure):  # noqa: N801
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullExtendedVirtual", ctypes.c_ulonglong),
+                ]
 
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-            metrics["ram"] = float(stat.dwMemoryLoad)
-    except Exception:
-        pass
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                metrics["ram"] = float(stat.dwMemoryLoad)
+        except Exception:
+            pass
 
     try:
         usage = shutil.disk_usage(Path.home().anchor or "/")
@@ -293,11 +497,67 @@ def _system_metrics() -> dict:
     return metrics
 
 
-# ── Volume control (optional pycaw dependency) ────────────────────────────────
+# ── Volume control (Windows pycaw / Linux pactl) ──────────────────────────────
+
+class _PactlVolume:
+    """Minimal PulseAudio volume controller via the `pactl` CLI (Linux).
+
+    Duck-types the pycaw IAudioEndpointVolume interface the handlers use,
+    so volume_control() works unchanged on Linux.
+    """
+
+    def __init__(self) -> None:
+        self._sink = self._default_sink()
+
+    def _default_sink(self) -> str:
+        try:
+            out = subprocess.run(
+                ["pactl", "get-default-sink"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return (out.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def _run_pactl(self, *args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                list(args), capture_output=True, text=True, timeout=5,
+            )
+        except Exception as e:
+            logger.error(f"pactl failed: {e}")
+            return None
+
+    def GetMasterVolumeLevelScalar(self) -> float:
+        out = self._run_pactl("pactl", "get-sink-volume", self._sink)
+        if out and out.stdout:
+            m = re.search(r"(\d{1,3})%", out.stdout)
+            if m:
+                return min(1.0, int(m.group(1)) / 100.0)
+        return 0.0
+
+    def SetMasterVolumeLevelScalar(self, value, context=None) -> None:
+        pct = max(0, min(100, int(round(float(value) * 100))))
+        self._run_pactl("pactl", "set-sink-volume", self._sink, f"{pct}%")
+
+    def SetMute(self, mute, context=None) -> None:
+        self._run_pactl(
+            "pactl", "set-sink-mute", self._sink, "1" if mute else "0"
+        )
+
 
 def _volume_api():
-    """Return a pycaw IAudioEndpointVolume controller, or None if the
-    pycaw/comtypes libraries are unavailable."""
+    """Return a volume controller, or None if unavailable.
+
+    Windows: pycaw IAudioEndpointVolume. Linux: pactl CLI wrapper.
+    """
+    if IS_LINUX:
+        if not shutil.which("pactl"):
+            logger.debug("Volume control unavailable (pactl not found).")
+            return None
+        return _PactlVolume()
+    if not IS_WINDOWS:
+        return None
     try:
         from ctypes import POINTER, cast
 
@@ -315,16 +575,21 @@ def _volume_api():
 
 
 def _lock_workstation() -> bool:
-    """Lock the Windows session. Returns True on success."""
-    if os.name != "nt":
-        return False
-    try:
-        import ctypes
+    """Lock the session. Returns True on success."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
 
-        return bool(ctypes.windll.user32.LockWorkStation())
-    except Exception as e:
-        logger.error(f"Lock failed: {e}")
-        return False
+            return bool(ctypes.windll.user32.LockWorkStation())
+        except Exception as e:
+            logger.error(f"Lock failed: {e}")
+            return False
+    if IS_LINUX:
+        # Lock the current session via logind (works in GNOME/KDE etc).
+        return _run(["loginctl", "lock-session"])
+    if IS_MACOS:
+        return _run(["pmset", "displaysleepnow"])
+    return False
 
 
 def _run(args: list[str]) -> bool:
@@ -343,11 +608,12 @@ def _run(args: list[str]) -> bool:
 # ── Common-app detection (for `jarvis --doctor`) ─────────────────────────────
 
 def detect_common_apps() -> dict[str, bool]:
-    """Check whether common Windows apps are present. Never raises."""
+    """Check whether common apps are present. Never raises."""
     result: dict[str, bool] = {}
     for name in ("notepad", "calculator", "chrome", "edge", "explorer"):
-        exe = APPS.get(name, "")
-        if exe.endswith(".exe"):
+        value = APPS.get(name, "")
+        exe = value.resolve() if isinstance(value, _LazyPath) else value
+        if exe.endswith(".exe") or not exe.startswith(("ms-",)):
             result[name] = _find_exe(exe)
         else:
             result[name] = True  # shell URIs are always "available"
@@ -435,26 +701,42 @@ class SystemCommands:
             logger.error(f"Could not open website {url}: {exc}")
             return "Sorry, I couldn't open that website."
 
-    def open_app(self, command: str, spoken_name: str) -> str:
-        """Launch a Windows application."""
+    def open_app(self, command, spoken_name: str) -> str:
+        """Launch an application."""
+        # Resolve lazy entries (chrome/browser) only when actually opened.
+        if isinstance(command, _LazyPath):
+            command = command.resolve()
+        if not isinstance(command, str):
+            command = str(command)
+
         try:
-            if command.lower().endswith(".exe"):
-                # Absolute paths (e.g. chrome.exe resolved to its install
-                # location) are checked up front so a missing binary gets
-                # a clear "not installed" reply instead of a raw error.
-                # Relative names (notepad.exe) are resolved via PATH and
-                # only fail inside Popen.
-                if os.path.isabs(command) and not os.path.isfile(command):
-                    logger.error(
-                        f"Application not found: {command}"
-                    )
-                    return (
-                        f"I couldn't find {spoken_name} on this machine. "
-                        "It may not be installed."
-                    )
-                subprocess.Popen(command)
+            if IS_WINDOWS:
+                if command.lower().endswith(".exe"):
+                    # Absolute paths (e.g. chrome.exe resolved to its install
+                    # location) are checked up front so a missing binary gets
+                    # a clear "not installed" reply instead of a raw error.
+                    # Relative names (notepad.exe) are resolved via PATH and
+                    # only fail inside Popen.
+                    if os.path.isabs(command) and not os.path.isfile(command):
+                        logger.error(f"Application not found: {command}")
+                        return (
+                            f"I couldn't find {spoken_name} on this machine. "
+                            "It may not be installed."
+                        )
+                    subprocess.Popen(command)
+                else:
+                    _startfile(command)  # e.g. ms-settings:, ms-photos:
+            elif IS_MACOS:
+                if command.startswith("ms-"):
+                    return self._unsupported(f"opening {spoken_name}")
+                # macOS apps are named, not binaries — open via `open -a`.
+                subprocess.Popen(["open", "-a", command])
+            elif IS_LINUX:
+                if command.startswith("ms-"):
+                    return self._unsupported(f"opening {spoken_name}")
+                subprocess.Popen([command])
             else:
-                _startfile(command)  # e.g. ms-settings:, ms-photos:
+                return self._unsupported(f"opening {spoken_name}")
             return f"Opening {spoken_name}."
         except FileNotFoundError:
             logger.error(f"Application not found: {command}")
@@ -466,8 +748,12 @@ class SystemCommands:
             logger.error(f"Could not open {spoken_name}: {exc}")
             return f"Sorry, I couldn't open {spoken_name}."
 
+    def _unsupported(self, action: str) -> str:
+        """Polite reply for an action the current platform cannot do."""
+        return f"{action} is not supported on {_platform_name()}."
+
     def open_folder(self, path: Path) -> str:
-        """Open a folder in Windows Explorer."""
+        """Open a folder in the OS file manager."""
         try:
             _startfile(str(path))
             return f"Opening {path.name}."
@@ -559,10 +845,15 @@ class SystemCommands:
     # ── Volume control ───────────────────────────────────────────────────────
 
     def volume_control(self, text: str) -> str:
-        """Adjust the master volume (pycaw). Reports clearly when the
-        optional audio library is unavailable instead of pretending."""
+        """Adjust the master volume (pycaw / pactl). Reports clearly when
+        the audio API is unavailable instead of pretending."""
         api = _volume_api()
         if api is None:
+            if IS_LINUX:
+                return (
+                    "Volume control isn't available — the pactl "
+                    "(PulseAudio) command is not installed."
+                )
             return (
                 "Volume control isn't available — the pycaw audio library "
                 "is not installed. Run: pip install pycaw comtypes"
@@ -625,9 +916,9 @@ class SystemCommands:
     # ── Lock screen ──────────────────────────────────────────────────────────
 
     def lock_screen(self) -> str:
-        """Lock the Windows workstation (exact recognized intent only)."""
+        """Lock the workstation (exact recognized intent only)."""
         if _lock_workstation():
-            return "Locking your screen, Sir."
+            return f"Locking your screen, {OWNER}."
         return "Sorry, I couldn't lock the screen."
 
     # ── Power actions (CONFIRM permission — run only after a yes) ────────────
@@ -637,21 +928,51 @@ class SystemCommands:
         confirms (see CommandRegistry permission handling)."""
         t = (text or "").lower()
         if re.search(r"\bshut\s*down\b|\bpower\s*off\b", t):
-            if _run(["shutdown", "/s", "/t", "5"]):
+            if IS_WINDOWS:
+                ok = _run(["shutdown", "/s", "/t", "5"])
+            elif IS_LINUX:
+                ok = _run(["systemctl", "poweroff"])
+            elif IS_MACOS:
+                ok = _run(["osascript", "-e", 'tell app "System Events" to shut down'])
+            else:
+                return self._unsupported("shutting down the computer")
+            if ok:
                 return f"Shutting down in 5 seconds, {OWNER}."
             return "Sorry, I couldn't shut down the computer."
         if re.search(r"\brestart\b|\breboot\b", t):
-            if _run(["shutdown", "/r", "/t", "5"]):
+            if IS_WINDOWS:
+                ok = _run(["shutdown", "/r", "/t", "5"])
+            elif IS_LINUX:
+                ok = _run(["systemctl", "reboot"])
+            elif IS_MACOS:
+                ok = _run(["osascript", "-e", 'tell app "System Events" to restart'])
+            else:
+                return self._unsupported("restarting the computer")
+            if ok:
                 return f"Restarting in 5 seconds, {OWNER}."
             return "Sorry, I couldn't restart the computer."
         if re.search(r"\bsleep\b|\bhibernate\b", t):
-            if _run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]):
+            if IS_WINDOWS:
+                ok = _run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+            elif IS_LINUX:
+                ok = _run(["systemctl", "suspend"])
+            elif IS_MACOS:
+                ok = _run(["pmset", "sleepnow"])
+            else:
+                return self._unsupported("putting the system to sleep")
+            if ok:
                 return f"Putting the system to sleep, {OWNER}."
             return "Sorry, I couldn't put the system to sleep."
         return "I don't know that power action."
 
     def abort_shutdown(self) -> str:
-        """Cancel a scheduled shutdown/restart (shutdown /a)."""
-        if _run(["shutdown", "/a"]):
-            return "Aborted the scheduled shutdown."
-        return "There was no scheduled shutdown to abort."
+        """Cancel a scheduled shutdown/restart."""
+        if IS_WINDOWS:
+            if _run(["shutdown", "/a"]):
+                return "Aborted the scheduled shutdown."
+            return "There was no scheduled shutdown to abort."
+        if IS_LINUX:
+            if _run(["systemctl", "cancel"]):
+                return "Aborted the scheduled shutdown."
+            return "There was no scheduled shutdown to abort."
+        return self._unsupported("aborting a shutdown")

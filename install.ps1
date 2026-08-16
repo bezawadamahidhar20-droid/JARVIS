@@ -62,7 +62,10 @@ foreach ($cmd in @('python', 'py', 'python3')) {
         if ($verStr -match '^(\d+)\.(\d+)') {
             $major = [int]$Matches[1]
             $minor = [int]$Matches[2]
-            if ($major -ge $PYTHON_MIN_MAJOR -and $minor -ge $PYTHON_MIN_MINOR) {
+            # Correct version gate: "major > min  OR (major == min AND
+            # minor >= min)" — the old "$major -ge 3 -and $minor -ge 10"
+            # wrongly rejected Python 4.0 (minor 0 < 10).
+            if ($major -gt $PYTHON_MIN_MAJOR -or ($major -eq $PYTHON_MIN_MAJOR -and $minor -ge $PYTHON_MIN_MINOR)) {
                 $pythonCmd = $cmd
                 Write-Info "Found Python $verStr"
                 break
@@ -99,6 +102,28 @@ Write-Info "Upgrading pip..."
 Write-Info "Installing dependencies from requirements.txt (this can take a while)..."
 & $venvPip install --quiet -r $req
 Write-Info "All dependencies installed."
+
+# 3b. Voice model — auto-download the default Piper voice if missing.
+# The default is en_US-lessac-medium (TTS_ENGINE=piper in .env). This
+# step is skipped when any .onnx voice already exists in voices/.
+Write-Info "Checking for a Piper voice model..."
+$voicesDir = Join-Path $RepoRoot 'voices'
+$voiceFiles = @()
+if (Test-Path $voicesDir) {
+    $voiceFiles = @(Get-ChildItem -Path $voicesDir -Filter *.onnx -File -ErrorAction SilentlyContinue)
+}
+if ($voiceFiles.Count -gt 0) {
+    Write-Info "Voice model found in voices/ ($($voiceFiles.Count) file(s))."
+} else {
+    Write-Warn "No voice model found in voices/ - downloading en_US-lessac-medium..."
+    & $venvPython -X utf8 -m piper.download_voices en_US-lessac-medium --download_dir $voicesDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Voice download failed. Run this manually later:"
+        Write-Warn "    $venvPython -m piper.download_voices en_US-lessac-medium --download_dir voices"
+    } else {
+        Write-Info "Voice model downloaded."
+    }
+}
 
 # 4. Install the `jarvis` command into user PATH
 $binDir = Join-Path $env:LOCALAPPDATA 'JARVIS\bin'

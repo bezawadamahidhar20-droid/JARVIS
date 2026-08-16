@@ -22,6 +22,7 @@ Security model (see README):
 """
 
 import inspect
+import random
 import re
 import secrets
 import threading
@@ -30,22 +31,45 @@ from dataclasses import dataclass, field
 
 from commands import system_commands, time_commands
 from commands.time_commands import DATE_RE, TIME_RE
+from config import jarvis_config
+
+# Public API of the commands package.
+__all__ = [
+    "PERMISSION_SAFE",
+    "PERMISSION_CONFIRM",
+    "PERMISSION_BLOCKED",
+    "Command",
+    "CommandResult",
+    "PendingConfirmation",
+    "CommandRegistry",
+]
 
 # Permission levels.
 PERMISSION_SAFE = "safe"
 PERMISSION_CONFIRM = "confirm"
 PERMISSION_BLOCKED = "blocked"
 
-try:
-    from config import jarvis_config
+OWNER = jarvis_config.OWNER
+CONFIRMATION_TIMEOUT = jarvis_config.CONFIRMATION_TIMEOUT
+CONFIRMATION_REQUIRE_TOKEN = jarvis_config.CONFIRMATION_REQUIRE_TOKEN
 
-    OWNER = jarvis_config.OWNER
-    CONFIRMATION_TIMEOUT = jarvis_config.CONFIRMATION_TIMEOUT
-    CONFIRMATION_REQUIRE_TOKEN = jarvis_config.CONFIRMATION_REQUIRE_TOKEN
-except Exception:
-    OWNER = "Sir"
-    CONFIRMATION_TIMEOUT = 30
-    CONFIRMATION_REQUIRE_TOKEN = False
+# ── Confirmation tokens ───────────────────────────────────────
+# Hex codes ("a3f2b1c9") are unpronounceable — Whisper hears 'a' as
+# "hey", 'f' as "ef", etc. Two-word phonetic pairs ("alpha bravo")
+# are reliable over voice: every word is distinct, ends in a vowel,
+# and is in the NATO/plain-English set the model knows cold.
+_CONFIRMATION_WORDS = (
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+    "golf", "hotel", "india", "juliet", "kilo", "lima",
+    "mike", "november", "oscar", "papa", "quebec", "romeo",
+    "sierra", "tango", "uniform", "victor", "whiskey",
+    "xray", "yankee", "zulu",
+)
+
+
+def _confirmation_token() -> str:
+    """Two distinct phonetic words ("alpha bravo") — voice-friendly."""
+    return " ".join(random.sample(_CONFIRMATION_WORDS, 2))
 
 
 # ── Command patterns ────────────────────────────────────────────────────────
@@ -192,8 +216,10 @@ class PendingConfirmation:
             timeout if timeout is not None else float(CONFIRMATION_TIMEOUT)
         )
         # Random nonce binding this specific confirmation to the reply.
-        # secrets.token_hex(4) = 8 hex chars (~32 bits of entropy).
-        self.token = secrets.token_hex(4)
+        # Two-word phonetic pair ("alpha bravo"): voice-friendly and
+        # at least 6 chars, so it is reliably recognized by Whisper
+        # (hex codes like "a3f2" were misheard) while still random.
+        self.token = _confirmation_token()
         self.require_token = (
             require_token if require_token is not None
             else bool(CONFIRMATION_REQUIRE_TOKEN)

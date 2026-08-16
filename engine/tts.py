@@ -25,23 +25,23 @@ import time
 
 import numpy as np
 
+from config import tts_config
 from utils.logger import get_logger
 
 logger = get_logger("tts")
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import tts_config
+__all__ = [
+    "TTSEngine",
+    "PiperBackend",
+    "Pyttsx3Backend",
+    "clean_for_speech",
+]
 
-    ENGINE = tts_config.ENGINE
-    VOICE_NAME = tts_config.VOICE
-    VOICE_PATH = tts_config.VOICE_PATH
-    RATE = tts_config.RATE
-except Exception:
-    ENGINE = "piper"
-    VOICE_NAME = "en_US-lessac-medium"
-    VOICE_PATH = ""
-    RATE = 200
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+ENGINE = tts_config.ENGINE
+VOICE_NAME = tts_config.VOICE
+VOICE_PATH = tts_config.VOICE_PATH
+RATE = tts_config.RATE
 
 # Strip common markdown artefacts the model may sprinkle into replies.
 # Order matters: links first ("[text](url)" -> "text"), then the symbols.
@@ -49,7 +49,24 @@ _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_SYMBOL_RE = re.compile(r"[*_`#>~]|(\{\d+:\w+\})")
 
 # Sentinel used to interrupt a speaking utterance between queue items.
-_STOP = "__STOP__"
+# A dedicated singleton class (not a plain string) so identity (is)
+# comparison is used — a user typing "__STOP__" in --text mode could
+# otherwise be mistaken for the stop signal by an == check.
+class _StopSentinel:
+    """Singleton marker for queue items that should interrupt speech."""
+
+    _instance: "_StopSentinel | None" = None
+
+    def __new__(cls) -> "_StopSentinel":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging only
+        return "<_StopSentinel>"
+
+
+_STOP = _StopSentinel()
 
 
 def clean_for_speech(text: str) -> str:
@@ -88,7 +105,7 @@ class PiperBackend:
             logger.warning(
                 f"Piper voice '{VOICE_NAME}.onnx' not found in voices/. "
                 "Download it with: python -m piper.download_voices "
-                f"{VOICE_NAME}"
+                f"{VOICE_NAME} --download_dir voices"
             )
             return False
         try:
@@ -246,7 +263,7 @@ class TTSEngine:
                 if done_event is not None:
                     done_event.set()
                 continue
-            if text == _STOP:
+            if text is _STOP:
                 if done_event is not None:
                     done_event.set()
                 continue

@@ -66,15 +66,3 @@ class MicrophoneManager:
         if self._available:
             return f"OK ({self.device_name})"
         return "UNAVAILABLE — no input device detected"
-
-    # ── Compatibility helpers ─────────────────────────────────
-
-    def get_recognizer(self):
-        """Kept for compatibility with old code."""
-        import speech_recognition as sr
-
-        return sr.Recognizer()
-
-    def get_microphone(self):
-        """Not used in sounddevice mode."""
-        return None

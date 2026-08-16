@@ -127,7 +127,7 @@ Piper is loaded once at startup. Each reply is synthesized in memory (no temp fi
 | **Python** | 3.10–3.14 |
 | **[Ollama](https://ollama.com/download)** | Serves the local brain; only needed for conversational answers |
 | **Model** | `ollama pull qwen3:8b` (or configure another in `.env`) |
-| **Piper voice** | `python -m piper.download_voices en_US-lessac-medium` (once) |
+| **Piper voice** | `python -m piper.download_voices en_US-lessac-medium --download_dir voices` (once) |
 | **Microphone + speakers** | Any device PortAudio can see |
 
 ---
@@ -158,7 +158,7 @@ cd JARVIS
 ollama pull qwen3:8b
 
 # 2. Download the Piper voice (if you haven't already)
-.\.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium
+.\.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium --download_dir voices
 
 # 3. Optional: edit your settings
 Copy-Item .env.example .env
@@ -455,7 +455,7 @@ The GUI is covered by headless smoke tests in CI (`tests/test_gui_import.py` —
 - Run `ollama pull qwen3:8b` (or whatever `OLLAMA_MODEL` is set to).
 
 **`[✗] Voice model` in `jarvis --doctor`**
-- Download the Piper voice once: `.\.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium`
+- Download the Piper voice once: `.\.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium --download_dir voices`
 
 **No microphone / JARVIS hears nothing**
 - Check Windows Sound settings → Input.

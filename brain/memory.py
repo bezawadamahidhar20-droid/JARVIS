@@ -16,18 +16,32 @@ never stores secrets (only the conversation turns themselves).
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional, Callable
 
+from config import jarvis_config, memory_config
 from utils.logger import get_logger
 
 logger = get_logger("memory")
 
+__all__ = [
+    "ConversationMemory",
+]
+
 # Message type
 Message = Dict[str, str]
+
+# Hard safety caps on loaded messages: a crafted/corrupt conversation
+# file must never inject an oversized system prompt or an unbounded
+# message list into the LLM context.
+_MAX_MESSAGE_CHARS = 10_000
+_MAX_MESSAGE_COUNT = 500
+_MAX_FILE_BYTES = 1_000_000  # 1 MB
+_VALID_ROLES = ("user", "assistant")
 
 
 # Repository root (parent of brain/), so the default MEMORY_FILE
@@ -55,6 +69,7 @@ class ConversationMemory:
         max_turns: int | None = None,
         max_chars: int | None = None,
         persist_path: str | None = None,
+        on_save_failure: Optional[Callable[[str], None]] = None,
     ):
         """
         Args:
@@ -68,21 +83,15 @@ class ConversationMemory:
             persist_path: Optional JSON file to load/save history.
                        None = use MEMORY_FILE from .env (empty string
                        disables persistence entirely).
+            on_save_failure: Optional callback invoked when a save has
+                       failed (e.g. disk full) so main.py can warn the
+                       user via TTS instead of silently losing context.
         """
-        # Import here to avoid circular import issues. Explicit
-        # constructor arguments always win over .env defaults.
-        try:
-            from config import jarvis_config, memory_config
-
-            cfg_turns = jarvis_config.MEMORY_MAX_TURNS
-            cfg_chars = jarvis_config.MEMORY_MAX_CHARS
-            cfg_persist = memory_config.PERSIST
-            cfg_file = memory_config.FILE
-        except Exception:
-            cfg_turns = 6
-            cfg_chars = 3000
-            cfg_persist = True
-            cfg_file = "data/conversation.json"
+        # Explicit constructor arguments always win over .env defaults.
+        cfg_turns = jarvis_config.MEMORY_MAX_TURNS
+        cfg_chars = jarvis_config.MEMORY_MAX_CHARS
+        cfg_persist = memory_config.PERSIST
+        cfg_file = memory_config.FILE
 
         self.max_turns = max_turns if max_turns is not None else cfg_turns
         self.max_chars = max_chars if max_chars is not None else cfg_chars
@@ -96,6 +105,10 @@ class ConversationMemory:
 
         self._lock = threading.RLock()
         self._messages: List[Message] = []
+        # Disk-full protection: consecutive save failures are counted so
+        # the caller can be warned and we never hammer a full disk.
+        self._save_failures = 0
+        self._on_save_failure = on_save_failure
         self._load()
         logger.info(
             f"Memory initialized (max {self.max_turns} turns, "
@@ -197,12 +210,32 @@ class ConversationMemory:
     # ── Persistence ───────────────────────────────────────────
 
     def _save(self) -> None:
-        """Write history to disk atomically. Never raises."""
+        """Write history to disk atomically. Never raises.
+
+        Disk-full protection: the free space is checked before writing;
+        on any failure the failure counter is bumped and the configured
+        callback is invoked so the user can be warned (context would be
+        lost on restart otherwise).
+        """
         if not self._persist_path:
             return
         try:
             path = Path(self._persist_path)
             path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Disk-full guard: refuse to write when < 50 MB free, so a
+            # full disk produces a clear warning instead of a silent
+            # failure (or a huge temp file that never renames).
+            try:
+                free_bytes = shutil.disk_usage(path.parent).free
+                if free_bytes < 50 * 1024 * 1024:
+                    raise OSError(
+                        f"low disk space on {path.parent} "
+                        f"({free_bytes // (1024 * 1024)} MB free)"
+                    )
+            except OSError as e:
+                raise OSError(f"cannot save conversation memory: {e}") from e
+
             # Atomic write: temp file in the same directory, then rename.
             fd, tmp = tempfile.mkstemp(
                 prefix=".conversation_", suffix=".tmp",
@@ -219,10 +252,28 @@ class ConversationMemory:
                 except OSError:
                     pass
                 raise
+            # Success — reset the failure streak.
+            if self._save_failures:
+                self._save_failures = 0
         except Exception as e:
+            self._save_failures += 1
             logger.warning(
-                f"Could not persist conversation memory: {e}"
+                f"Could not persist conversation memory (attempt "
+                f"{self._save_failures}): {e}"
             )
+            if self._on_save_failure is not None:
+                try:
+                    self._on_save_failure(
+                        "I could not save our conversation to disk. "
+                        "It will be lost if I restart."
+                    )
+                except Exception:
+                    pass
+
+    @property
+    def save_failure_count(self) -> int:
+        """Number of consecutive failed saves (0 = healthy)."""
+        return self._save_failures
 
     def _load(self) -> None:
         """Load history from disk. Missing/corrupt files are handled
@@ -232,17 +283,37 @@ class ConversationMemory:
         path = Path(self._persist_path)
         if not path.is_file():
             return  # nothing to load — first run
+        # Size cap: refuse to trust a giant/crafted conversation file.
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                logger.warning(
+                    f"Conversation memory file is {path.stat().st_size} "
+                    f"bytes (> {_MAX_FILE_BYTES} cap) — treating as corrupt."
+                )
+                self._messages = []
+                self._backup_corrupt(path, "file too large")
+                return
+        except OSError:
+            return
         try:
             with open(path, encoding="utf-8") as f:
                 raw = json.load(f)
+            # Validate the schema: a list of {role, content} messages
+            # with strict role/content checks and size caps, so a
+            # crafted file can never inject system prompts or force an
+            # unbounded context.
             messages = []
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                role = item.get("role")
-                content = item.get("content")
-                if role in ("user", "assistant") and isinstance(content, str):
-                    messages.append({"role": role, "content": content.strip()})
+            if isinstance(raw, list):
+                for item in raw[: _MAX_MESSAGE_COUNT]:
+                    if not isinstance(item, dict):
+                        continue
+                    role = item.get("role")
+                    content = item.get("content")
+                    if role in _VALID_ROLES and isinstance(content, str):
+                        content = content.strip()
+                        if len(content) > _MAX_MESSAGE_CHARS:
+                            content = content[:_MAX_MESSAGE_CHARS]
+                        messages.append({"role": role, "content": content})
             self._messages = messages
             self._enforce_limit()
             if messages:
@@ -254,21 +325,25 @@ class ConversationMemory:
             # Corrupt file: keep it for inspection, start fresh, and
             # recreate the working file so the next run is clean.
             self._messages = []
-            try:
-                backup = path.with_name(
-                    f"{path.stem}.corrupt-{int(time.time())}{path.suffix}"
-                )
-                os.replace(str(path), str(backup))
-                logger.warning(
-                    f"Conversation memory file was corrupt ({e}); "
-                    f"backed up to {backup.name} and starting fresh."
-                )
-                self._save()
-            except OSError:
-                logger.warning(
-                    f"Conversation memory file was corrupt ({e}); "
-                    "starting fresh."
-                )
+            self._backup_corrupt(path, str(e))
+
+    def _backup_corrupt(self, path: Path, reason: str) -> None:
+        """Move a corrupt conversation file aside and start fresh."""
+        try:
+            backup = path.with_name(
+                f"{path.stem}.corrupt-{int(time.time())}{path.suffix}"
+            )
+            os.replace(str(path), str(backup))
+            logger.warning(
+                f"Conversation memory file was corrupt ({reason}); "
+                f"backed up to {backup.name} and starting fresh."
+            )
+            self._save()
+        except OSError:
+            logger.warning(
+                f"Conversation memory file was corrupt ({reason}); "
+                "starting fresh."
+            )
 
     def _enforce_limit(self) -> None:
         """

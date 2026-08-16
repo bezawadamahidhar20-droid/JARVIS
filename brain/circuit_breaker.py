@@ -56,8 +56,22 @@ class CircuitBreaker:
             self._open_until = 0.0
 
     def record_failure(self) -> None:
-        """A call failed — open the breaker at the threshold."""
+        """A call failed — open the breaker at the threshold.
+
+        Half-open handling: if the recovery window has elapsed, the next
+        caller is allowed through as a single probe. If that probe fails,
+        the breaker must re-open IMMEDIATELY (not wait for another
+        ``failure_threshold`` failures), otherwise a dead backend would
+        hang the assistant for 3 × timeout on every recovery attempt.
+        """
         with self._lock:
+            if not self.enabled:
+                return
+            if self._open_until > 0.0 and time.monotonic() >= self._open_until:
+                # A half-open probe failed — re-open right away.
+                self._open_until = time.monotonic() + self.recovery_timeout
+                self._failures = 0
+                return
             self._failures += 1
             if self._failures >= self.failure_threshold:
                 self._open_until = time.monotonic() + self.recovery_timeout

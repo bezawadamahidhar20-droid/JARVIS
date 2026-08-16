@@ -31,9 +31,18 @@ educational question never triggers a web round-trip.
 import re
 
 from commands.time_commands import DATE_RE, TIME_RE
+from config import jarvis_config
 from utils.logger import get_logger
 
 logger = get_logger("classifier")
+
+__all__ = [
+    "QuestionClassifier",
+    "TIME_TOOL",
+    "DATE_TOOL",
+    "WEB_SEARCH",
+    "LOCAL_LLM",
+]
 
 # Classifier outputs.
 TIME_TOOL = "time_tool"
@@ -41,13 +50,8 @@ DATE_TOOL = "date_tool"
 WEB_SEARCH = "web_search"
 LOCAL_LLM = "local_llm"
 
-# ── Load config safely ────────────────────────────────────────
-try:
-    from config import jarvis_config
-
-    DEFAULT_MODE = jarvis_config.AI_MODE
-except Exception:
-    DEFAULT_MODE = "auto"
+# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+DEFAULT_MODE = jarvis_config.AI_MODE
 
 _VALID_MODES = ("auto", "local", "web")
 

@@ -159,7 +159,7 @@ def _check_voice_model():
     if missing:
         return False, (
             "missing: " + "; ".join(missing) + " — download with: "
-            f"python -m piper.download_voices {name}"
+            f"python -m piper.download_voices {name} --download_dir voices"
         )
     return True, str(onnx)
 
@@ -399,7 +399,7 @@ CHECKS = [
            "Run:  pip install piper-tts"),
     _check("Voice model", _check_voice_model,
            "Download the voice with:  python -m piper.download_voices "
-           "en_US-lessac-medium  (see TTS_VOICE in .env)"),
+           "en_US-lessac-medium --download_dir voices  (see TTS_VOICE in .env)"),
     _check("Ollama", _check_ollama,
            "Start the Ollama app, or run:  ollama serve\n"
            "Then check http://localhost:11434 in a browser."),
