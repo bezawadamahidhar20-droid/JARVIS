@@ -9,6 +9,7 @@ Decides whether user input is:
   5. CLEAR_MEMORY        (reset conversation context)
   6. FAST_RESPONSE       (instant canned reply to a greeting)
   7. STOP_SPEECH         (interrupt TTS output)
+  8. MODEL_MODE          (runtime fast/quality model switch + status)
 
 CRITICAL RULE:
 Anything that is NOT matched as a command, a web-search question, or a
@@ -39,6 +40,7 @@ class Intent:
     EXIT = "exit"
     FAST_RESPONSE = "fast_response"
     STOP_SPEECH = "stop_speech"
+    MODEL_MODE = "model_mode"
     UNKNOWN = "unknown"
 
 
@@ -182,6 +184,64 @@ def normalize_wake_name(text: str) -> str:
             last = m.end()
     out.append(text[last:])
     return "".join(out)
+
+
+# ── Runtime model-mode control ────────────────────────────────
+# "Switch to fast mode" / "which model are you using" are handled
+# deterministically — no LLM round-trip, instant reply.
+
+# Switch requests: an explicit verb + a mode word + mode/model.
+_MODEL_MODE_SWITCH_RE = re.compile(
+    r"\b(switch|change|set|use|go)\s+(to\s+|into\s+)?(the\s+)?"
+    r"(fast|quick|speed|quality|accurate|full)\s+(mode|model)\b",
+    re.IGNORECASE,
+)
+# Shorter forms: "use the fast one".
+_MODEL_MODE_USE_RE = re.compile(
+    r"\buse\s+(the\s+)?(fast|quality)\s+(one|model)\b",
+    re.IGNORECASE,
+)
+# "set/switch the model to fast".
+_MODEL_MODE_TO_RE = re.compile(
+    r"\b(switch|change|set)\s+(the\s+)?model\s+"
+    r"(to\s+|over\s+to\s+)?(fast|quality)\b",
+    re.IGNORECASE,
+)
+# Status requests: ask what model/mode JARVIS is on.
+_MODEL_MODE_STATUS_RE = re.compile(
+    r"\b(which|what)\s+model\s+(are you (using|running|on)|do you use)\b"
+    r"|\bwhat\s+mode\s+(are you (in|using)|is this)\b",
+    re.IGNORECASE,
+)
+# Modes we can switch to (fast words -> fast mode, quality words -> quality).
+_FAST_MODE_WORD_RE = re.compile(r"\b(fast|quick|speed)\b", re.IGNORECASE)
+_QUALITY_MODE_WORD_RE = re.compile(r"\b(quality|accurate|full)\b", re.IGNORECASE)
+
+
+def parse_model_mode_request(text: str) -> str | None:
+    """Classify a model-mode utterance.
+
+    Returns:
+        "fast"    — switch to fast mode
+        "quality" — switch to quality mode
+        "status"  — report the current mode + model
+        None      — not a model-mode request (route as AI question)
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    if _MODEL_MODE_STATUS_RE.search(t):
+        return "status"
+    if (
+        _MODEL_MODE_SWITCH_RE.search(t)
+        or _MODEL_MODE_USE_RE.search(t)
+        or _MODEL_MODE_TO_RE.search(t)
+    ):
+        if _FAST_MODE_WORD_RE.search(t):
+            return "fast"
+        if _QUALITY_MODE_WORD_RE.search(t):
+            return "quality"
+    return None
 
 
 def _build_command_patterns() -> List[str]:
@@ -350,36 +410,42 @@ class IntentRouter:
             logger.info(f"Intent CLEAR_MEMORY: '{text}'")
             return Intent.CLEAR_MEMORY, text
 
-        # 3 — Instant canned replies to greetings (no AI round-trip)
+        # 3 — Runtime model-mode control (fast/quality switch, status)
+        mode_request = parse_model_mode_request(text)
+        if mode_request is not None:
+            logger.info(f"Intent MODEL_MODE: '{text}' -> {mode_request}")
+            return Intent.MODEL_MODE, mode_request
+
+        # 4 — Instant canned replies to greetings (no AI round-trip)
         if ENABLE_FAST_RESPONSES:
             reply = FAST_RESPONSES.get(_normalize_key(text))
             if reply:
                 logger.info(f"Intent FAST_RESPONSE: '{text}'")
                 return Intent.FAST_RESPONSE, reply
 
-        # 4 — Stop speaking (interrupt TTS)
+        # 5 — Stop speaking (interrupt TTS)
         if self._matches(text, self._stop_re):
             logger.info(f"Intent STOP_SPEECH: '{text}'")
             return Intent.STOP_SPEECH, text
 
-        # 5 — System commands
+        # 6 — System commands
         if self._matches(text, self._command_re):
             logger.info(f"Intent COMMAND: '{text}'")
             return Intent.COMMAND, text
 
-        # 6 — Question classifier: current information needs a web search
+        # 7 — Question classifier: current information needs a web search
         decision = self.classifier.classify(text)
         if decision == "web_search":
             logger.info(f"Intent WEB_SEARCH: '{text}'")
             return Intent.WEB_SEARCH, text
 
-        # 7 — Deterministic clock/calendar the command patterns missed
+        # 8 — Deterministic clock/calendar the command patterns missed
         #     ("what day is today", "what is today date", ...)
         if decision in ("time_tool", "date_tool"):
             logger.info(f"Intent COMMAND (clock): '{text}'")
             return Intent.COMMAND, text
 
-        # 8 — DEFAULT: send everything else to the AI brain
+        # 9 — DEFAULT: send everything else to the AI brain
         logger.info(f"Intent AI_QUESTION: '{text}'")
         return Intent.AI_QUESTION, text
 

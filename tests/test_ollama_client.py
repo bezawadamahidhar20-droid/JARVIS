@@ -140,6 +140,40 @@ def test_build_payload_has_think_false(monkeypatch):
     assert payload["options"]["temperature"] >= 0
 
 
+def test_switch_model_changes_active_model(monkeypatch):
+    client = _make_client(
+        monkeypatch, get_response=FakeResponse(200, {"models": []})
+    )
+    assert client.model == "qwen3:8b"
+    assert client.switch_model("qwen3:1.7b") == "qwen3:1.7b"
+    assert client.model == "qwen3:1.7b"
+    # Switching to the same model is a no-op.
+    assert client.switch_model("qwen3:1.7b") == "qwen3:1.7b"
+
+
+def test_switch_model_rejects_empty_name(monkeypatch):
+    import pytest
+
+    client = _make_client(
+        monkeypatch, get_response=FakeResponse(200, {"models": []})
+    )
+    with pytest.raises(ValueError):
+        client.switch_model("")
+    with pytest.raises(ValueError):
+        client.switch_model("   ")
+
+
+def test_payload_uses_switched_model(monkeypatch):
+    client = _make_client(
+        monkeypatch, get_response=FakeResponse(200, {"models": []})
+    )
+    client.switch_model("llama3.2:3b")
+    payload = client._build_payload(
+        [{"role": "user", "content": "hi"}], stream=False
+    )
+    assert payload["model"] == "llama3.2:3b"
+
+
 def test_warmup_payload_disables_thinking(monkeypatch):
     """The warm-up request must load the model in the same state as
     real requests (think disabled) — otherwise the first question pays

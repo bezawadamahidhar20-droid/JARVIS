@@ -157,6 +157,15 @@ class FallbackProvider(LLMProvider):
         except Exception as e:
             logger.warning(f"Warm-up failed (non-critical): {e}")
 
+    def switch_model(self, model: str) -> str:
+        """Switch the primary (local) model at runtime."""
+        fn = getattr(self.primary, "switch_model", None)
+        if fn is None:
+            raise NotImplementedError(
+                "primary provider cannot switch models at runtime"
+            )
+        return fn(model)
+
 
 def _groq_fallback() -> "LLMProvider | None":
     """Build a GroqClient only when an API key is configured."""

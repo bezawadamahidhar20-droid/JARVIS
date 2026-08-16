@@ -112,6 +112,111 @@ def test_normal_command_open_app_full_pipeline(monkeypatch):
     assert any("Opening notepad" in s for s in jarvis.tts.spoken)
 
 
+def test_deterministic_commands_bypass_llm(monkeypatch):
+    """Issue: simple deterministic commands MUST NOT use the LLM.
+
+    Pipeline is Whisper → Router → Tool (no Qwen3 round-trip), so
+    commands like "open Notepad" or "what time is it" stay near
+    instant even when the AI model is slow.
+    """
+    launched = []
+    monkeypatch.setattr(sc.subprocess, "Popen", lambda cmd: launched.append(cmd))
+    provider = FakeProvider(reply="should never be used")
+    jarvis = make_jarvis(provider=provider)
+
+    for cmd in (
+        "open notepad",
+        "open calculator",
+        "what time is it",
+        "what is today's date",
+    ):
+        assert jarvis.process_input(cmd) is True
+
+    # The AI provider was never consulted for any deterministic command.
+    assert provider.asked == []
+    # The tool layer actually ran (apps launched via the registry).
+    assert launched == ["notepad.exe", "calc.exe"]
+    assert any("It's" in s for s in jarvis.tts.spoken)  # clock answer
+    assert any("Today is" in s for s in jarvis.tts.spoken)  # calendar
+
+
+# ── Runtime model-mode switch ────────────────────────────────
+
+class SwitchableProvider(FakeProvider):
+    """FakeProvider that supports runtime model switches."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model = "qwen3:8b"
+        self.switched = []
+
+    def switch_model(self, model):
+        self.switched.append(model)
+        self.model = model
+        return model
+
+
+def _switch_jarvis(monkeypatch, provider=None):
+    from config import jarvis_config
+
+    # No background warm-up threads in tests.
+    monkeypatch.setattr(jarvis_config, "ENABLE_WARMUP", False)
+    return make_jarvis(
+        provider=provider if provider is not None else SwitchableProvider()
+    )
+
+
+def test_runtime_switch_to_fast_mode(monkeypatch):
+    """"Switch to fast mode" must change the provider's model without
+    an LLM round-trip and without a restart."""
+    provider = SwitchableProvider()
+    jarvis = _switch_jarvis(monkeypatch, provider)
+    assert jarvis.process_input("switch to fast mode") is True
+    assert provider.model == "qwen3:1.7b"
+    assert provider.asked == []  # deterministic — no LLM call
+    assert any("fast" in s.lower() and "qwen3:1.7b" in s
+               for s in jarvis.tts.spoken)
+
+
+def test_runtime_switch_to_quality_mode(monkeypatch):
+    provider = SwitchableProvider()
+    jarvis = _switch_jarvis(monkeypatch, provider)
+    # Start in fast mode, then switch to quality.
+    assert jarvis.process_input("switch to fast mode") is True
+    assert provider.model == "qwen3:1.7b"
+    assert jarvis.process_input("switch to quality mode") is True
+    assert provider.model == "qwen3:8b"
+    assert provider.switched == ["qwen3:1.7b", "qwen3:8b"]
+
+
+def test_runtime_switch_idempotent(monkeypatch):
+    """Switching to the mode already active is a friendly no-op."""
+    provider = SwitchableProvider()
+    jarvis = _switch_jarvis(monkeypatch, provider)
+    assert jarvis.process_input("switch to quality mode") is True
+    assert provider.model == "qwen3:8b"
+    assert provider.switched == []  # same model — nothing to switch
+    assert any("already" in s.lower() for s in jarvis.tts.spoken)
+
+
+def test_runtime_model_status_query(monkeypatch):
+    """"Which model are you using" reports the active model — no LLM."""
+    provider = SwitchableProvider()
+    jarvis = _switch_jarvis(monkeypatch, provider)
+    assert jarvis.process_input("which model are you using") is True
+    assert provider.asked == []
+    assert any("qwen3:8b" in s and "quality" in s for s in jarvis.tts.spoken)
+
+
+def test_runtime_switch_unknown_mode_falls_back_to_llm(monkeypatch):
+    """An unknown mode is a normal question, not a crash."""
+    provider = SwitchableProvider()
+    jarvis = _switch_jarvis(monkeypatch, provider)
+    assert jarvis.process_input("switch to turbo mode") is True
+    assert provider.asked  # routed to the AI brain
+    assert provider.model == "qwen3:8b"  # unchanged
+
+
 # ── Invalid input ─────────────────────────────────────────────
 
 def test_invalid_input_does_not_crash():

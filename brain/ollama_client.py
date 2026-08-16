@@ -91,6 +91,18 @@ from brain.text_utils import clean_response, split_into_sentences  # noqa: E402
 MAX_PARTIAL_CHARS = 200
 
 
+def _resolve_default_model() -> str:
+    """Model used when the caller passes none.
+
+    Honors JARVIS_MODEL_MODE from .env: fast -> OLLAMA_FAST_MODEL,
+    quality -> OLLAMA_QUALITY_MODEL, falling back to OLLAMA_MODEL.
+    """
+    try:
+        return ollama_config.resolve_model()
+    except Exception:
+        return OLLAMA_MODEL
+
+
 class OllamaClient(LLMProvider):
     """
     Client for a local Ollama server (configurable model).
@@ -113,7 +125,7 @@ class OllamaClient(LLMProvider):
         think: bool = None
     ):
         self.base_url    = base_url      or OLLAMA_BASE_URL
-        self.model       = model         or OLLAMA_MODEL
+        self.model       = model         or _resolve_default_model()
         self.timeout     = timeout       or OLLAMA_TIMEOUT
         self.temperature = temperature   if temperature is not None else OLLAMA_TEMP
         self.stream      = stream        if stream is not None else OLLAMA_STREAM
@@ -127,6 +139,22 @@ class OllamaClient(LLMProvider):
     def describe(self) -> str:
         """Short status string for `jarvis --doctor`."""
         return f"{self.model} @ {self.base_url}"
+
+    def switch_model(self, model: str) -> str:
+        """
+        Switch the active model at runtime (no restart needed).
+
+        Callers should warm the new model up afterwards (see
+        ``warmup()``) so the first question after the switch has no
+        cold-start delay. Returns the active model name.
+        """
+        model = (model or "").strip()
+        if not model:
+            raise ValueError("switch_model requires a model name")
+        if model != self.model:
+            logger.info(f"Model switched: {self.model} -> {model}")
+            self.model = model
+        return self.model
 
     # ── Connection check ──────────────────────────────────────
 

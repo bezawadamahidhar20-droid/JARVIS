@@ -6,6 +6,9 @@ Usage (from ANY directory after install):
     jarvis --text          text-only mode (no microphone)
     jarvis --debug         verbose debug logging on the console
     jarvis --benchmark     print per-stage latency report on exit
+    jarvis --benchmark-models   compare qwen3:8b / qwen3:1.7b / llama3.2:3b
+                            and recommend a model (never changes config)
+    jarvis --hardware      show a CPU / RAM / GPU / Ollama report
     jarvis --doctor        run the health check and print fixes
     jarvis --version       show the installed version
     jarvis --help          show this help
@@ -35,17 +38,21 @@ logger = get_logger("cli")
 def _build_parser():
     import argparse
 
+    # ASCII-only help text: the Windows cp1252 console crashes on
+    # non-ASCII glyphs (arrows/em dashes) when stdout is piped.
     parser = argparse.ArgumentParser(
         prog="jarvis",
         description=(
-            "JARVIS — a private, local AI voice assistant for Windows. "
-            "Microphone → VAD → Faster-Whisper → Router → Ollama → Piper."
+            "JARVIS - a private, local AI voice assistant for Windows. "
+            "Microphone > VAD > Faster-Whisper > Router > Ollama > Piper."
         ),
         epilog=(
             "Examples:\n"
             "  jarvis                start in voice mode\n"
             "  jarvis --text         chat without a microphone\n"
             "  jarvis --doctor       health check\n"
+            "  jarvis --benchmark-models   compare models and recommend\n"
+            "  jarvis --hardware     show a CPU/RAM/GPU report\n"
         ),
     )
     parser.add_argument(
@@ -59,6 +66,18 @@ def _build_parser():
     parser.add_argument(
         "--benchmark", action="store_true",
         help="print a per-stage latency report when JARVIS exits",
+    )
+    parser.add_argument(
+        "--benchmark-models", action="store_true",
+        help=(
+            "benchmark the candidate models (qwen3:8b, qwen3:1.7b, "
+            "llama3.2:3b) on identical questions and recommend one "
+            "(never changes configuration)"
+        ),
+    )
+    parser.add_argument(
+        "--hardware", action="store_true",
+        help="show a read-only CPU / RAM / GPU / Ollama report",
     )
     parser.add_argument(
         "--doctor", action="store_true",
@@ -105,6 +124,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.version:
         return _print_version()
+
+    if args.benchmark_models:
+        from jarvis_cli.benchmark import run_benchmark
+
+        return run_benchmark(verbose=args.debug)
+
+    if args.hardware:
+        from jarvis_cli.hardware import run_hardware
+
+        return run_hardware()
 
     if args.doctor:
         from jarvis_cli.doctor import run_doctor

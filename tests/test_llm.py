@@ -2,7 +2,7 @@
 
 import pytest
 
-from brain.llm import create_provider, LLMProvider
+from brain.llm import FallbackProvider, create_provider, LLMProvider
 from brain.ollama_client import OllamaClient
 
 
@@ -35,3 +35,31 @@ def test_create_provider_default(monkeypatch):
     )
     provider = create_provider()
     assert provider.name == "ollama"
+
+
+def test_fallback_provider_switch_model_passthrough():
+    """The fallback wrapper must forward runtime model switches to its
+    primary (local) provider."""
+    calls = []
+
+    class Primary:
+        model = "qwen3:8b"
+
+        def switch_model(self, model):
+            calls.append(model)
+            self.model = model
+            return model
+
+    fallback = FallbackProvider(Primary(), fallback=None)
+    assert fallback.switch_model("qwen3:1.7b") == "qwen3:1.7b"
+    assert calls == ["qwen3:1.7b"]
+    assert fallback.primary.model == "qwen3:1.7b"
+
+
+def test_fallback_provider_switch_model_unsupported():
+    class NoSwitch:
+        pass
+
+    fallback = FallbackProvider(NoSwitch(), fallback=None)
+    with pytest.raises(NotImplementedError):
+        fallback.switch_model("qwen3:1.7b")

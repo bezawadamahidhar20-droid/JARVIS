@@ -55,6 +55,12 @@ class OllamaConfig:
     BASE_URL: str = _env_str("OLLAMA_BASE_URL", "http://localhost:11434")
     # Model used as the AI brain (configurable; qwen3:8b is the default).
     MODEL: str = _env_str("OLLAMA_MODEL", "qwen3:8b")
+    # Optional per-mode models, selected by JARVIS_MODEL_MODE:
+    #   quality -> QUALITY_MODEL (falling back to MODEL)
+    #   fast    -> FAST_MODEL     (falling back to MODEL)
+    # Empty values keep the current OLLAMA_MODEL behavior.
+    FAST_MODEL: str = _env_str("OLLAMA_FAST_MODEL", "")
+    QUALITY_MODEL: str = _env_str("OLLAMA_QUALITY_MODEL", "")
     TIMEOUT: int = _env_int("OLLAMA_TIMEOUT", 120)
     TEMPERATURE: float = _env_float("OLLAMA_TEMPERATURE", 0.7)
     STREAM: bool = _env_bool("OLLAMA_STREAM", True)
@@ -70,6 +76,25 @@ class OllamaConfig:
     NUM_GPU: int = _env_int("OLLAMA_NUM_GPU", 99)
     # Disable Qwen3 "thinking" tokens for low latency voice replies.
     THINK: bool = _env_bool("OLLAMA_THINK", False)
+
+    def resolve_model(self, mode: str | None = None) -> str:
+        """
+        Pick the Ollama model for the current JARVIS_MODEL_MODE.
+
+        * mode == "fast"    -> OLLAMA_FAST_MODEL   (or OLLAMA_MODEL)
+        * mode == "quality" -> OLLAMA_QUALITY_MODEL (or OLLAMA_MODEL)
+        * anything else     -> OLLAMA_MODEL (the default / current behavior)
+
+        An explicit ``mode`` argument overrides JARVIS_MODEL_MODE (used
+        by tests and by callers that need a specific mode).
+        """
+        if mode is None:
+            mode = (jarvis_config.MODEL_MODE or "quality").strip().lower()
+        if mode == "fast" and (self.FAST_MODEL or "").strip():
+            return self.FAST_MODEL.strip()
+        if mode == "quality" and (self.QUALITY_MODEL or "").strip():
+            return self.QUALITY_MODEL.strip()
+        return (self.MODEL or "qwen3:8b").strip()
 
 
 class WhisperConfig:
@@ -193,6 +218,13 @@ class JARVISConfig:
     #   web   — always search before answering
     AI_MODE: str = _env_str("AI_MODE", "auto").strip().lower()
 
+    # Which Ollama model to use:
+    #   quality — OLLAMA_QUALITY_MODEL (falls back to OLLAMA_MODEL)
+    #   fast    — OLLAMA_FAST_MODEL     (falls back to OLLAMA_MODEL)
+    # Defaults to "quality" so behavior is unchanged unless the user
+    # opts into fast mode.
+    MODEL_MODE: str = _env_str("JARVIS_MODEL_MODE", "quality").strip().lower()
+
     # How many user+assistant turns to keep (smaller = faster prompts).
     MEMORY_MAX_TURNS: int = _env_int("MEMORY_MAX_TURNS", 6)
     # Max characters of history sent per request (older turns dropped).
@@ -261,6 +293,11 @@ def validate_config() -> list[dict]:
             "AI_MODE",
             f"'{c.AI_MODE}' is not supported (use auto, local or web).",
         ))
+    if (c.MODEL_MODE or "quality") not in ("fast", "quality"):
+        problems.append(_problem(
+            "JARVIS_MODEL_MODE",
+            f"'{c.MODEL_MODE}' is not supported (use fast or quality).",
+        ))
     if c.MAX_INPUT_CHARS < 1:
         problems.append(_problem(
             "JARVIS_MAX_INPUT_CHARS",
@@ -285,6 +322,12 @@ def validate_config() -> list[dict]:
     if not (o.MODEL or "").strip():
         problems.append(_problem(
             "OLLAMA_MODEL", "must not be empty.", fatal=True,
+        ))
+    if c.MODEL_MODE == "fast" and not (o.FAST_MODEL or "").strip():
+        problems.append(_problem(
+            "OLLAMA_FAST_MODEL",
+            "JARVIS_MODEL_MODE=fast but OLLAMA_FAST_MODEL is empty — "
+            "falling back to OLLAMA_MODEL.",
         ))
     if o.TIMEOUT <= 0:
         problems.append(_problem(

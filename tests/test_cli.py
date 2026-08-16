@@ -11,17 +11,22 @@ def test_parser_defaults():
     assert args.debug is False
     assert args.doctor is False
     assert args.benchmark is False
+    assert args.benchmark_models is False
+    assert args.hardware is False
     assert args.gui is False
     assert args.startup is None
 
 
 def test_parser_flags():
     args = _build_parser().parse_args(
-        ["--text", "--debug", "--benchmark", "--doctor"]
+        ["--text", "--debug", "--benchmark", "--benchmark-models",
+         "--hardware", "--doctor"]
     )
     assert args.text is True
     assert args.debug is True
     assert args.benchmark is True
+    assert args.benchmark_models is True
+    assert args.hardware is True
     assert args.doctor is True
 
 
@@ -50,6 +55,32 @@ def test_doctor_dispatches(monkeypatch, capsys):
     assert main(["--doctor"]) == 0
     assert calls["verbose"] is False
     assert "FAKE DOCTOR OUTPUT" in capsys.readouterr().out
+
+
+def test_benchmark_models_dispatches(monkeypatch):
+    calls = {}
+
+    def fake_benchmark(verbose=False):
+        calls["verbose"] = verbose
+        return 0
+
+    monkeypatch.setattr(
+        "jarvis_cli.benchmark.run_benchmark", fake_benchmark
+    )
+    assert main(["--benchmark-models", "--debug"]) == 0
+    assert calls["verbose"] is True
+
+
+def test_hardware_dispatches(monkeypatch):
+    calls = {}
+
+    def fake_hardware():
+        calls["ran"] = True
+        return 0
+
+    monkeypatch.setattr("jarvis_cli.hardware.run_hardware", fake_hardware)
+    assert main(["--hardware"]) == 0
+    assert calls["ran"] is True
 
 
 def test_startup_dispatches(monkeypatch):

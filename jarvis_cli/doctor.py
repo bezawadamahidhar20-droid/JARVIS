@@ -193,12 +193,14 @@ def _check_llm_model():
     if r.status_code != 200:
         return True, "Ollama unreachable (see Ollama check)"
     models = [m.get("name", "") for m in r.json().get("models", [])]
-    base = ollama_config.MODEL.split(":")[0]
+    # The *resolved* model — honors JARVIS_MODEL_MODE (fast/quality).
+    model = ollama_config.resolve_model()
+    base = model.split(":")[0]
     if any(base in n for n in models):
-        return True, ollama_config.MODEL
+        return True, model
     return False, (
-        f"model '{ollama_config.MODEL}' not installed — "
-        f"run: ollama pull {ollama_config.MODEL}"
+        f"model '{model}' not installed — "
+        f"run: ollama pull {model}"
     )
 
 
@@ -366,10 +368,11 @@ def _check_model_keepalive():
     if r.status_code != 200:
         return True, "cannot query Ollama", "warn"
     loaded = [m.get("name", "") for m in r.json().get("models", [])]
-    base = ollama_config.MODEL.split(":")[0]
+    model = ollama_config.resolve_model()
+    base = model.split(":")[0]
     if any(base in n for n in loaded):
         return True, (
-            f"{ollama_config.MODEL} loaded (keep_alive "
+            f"{model} loaded (keep_alive "
             f"{ollama_config.KEEP_ALIVE})"
         )
     return True, (

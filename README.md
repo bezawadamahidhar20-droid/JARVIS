@@ -44,7 +44,9 @@ jarvis
 | 🧭 | **Deterministic command router** | Fast, safe local commands (apps, websites, folders, time, date, screenshots, volume, lock) never touch the LLM |
 | 🌐 | **Current-information web search** | "Who is the current CM of AP?" → real search results, not stale training data (Tavily/Serper/Brave) |
 | 🧠 | **AI is the default route** | Anything the router doesn't match goes to the model — never an "I don't understand" dead-end |
-| 🏥 | **`jarvis --doctor`** | 14-point health check with exact fix instructions for anything broken |
+| 🏥 | **`jarvis --doctor`** | 18-point health check with exact fix instructions for anything broken |
+| ⚖️ | **`jarvis --benchmark-models`** | Compare models on identical questions and recommend one (never changes config) |
+| 🖥️ | **`jarvis --hardware`** | Read-only CPU / RAM / GPU / Ollama report |
 | 🖥️ | **Optional desktop GUI** | PySide6 + OpenGL holographic interface (`jarvis --gui`) |
 | 🔌 | **Provider-agnostic AI layer** | New providers (Groq, NVIDIA NIM, Gemini) can be added without rewriting JARVIS |
 
@@ -196,6 +198,8 @@ Then just talk.
 | `jarvis --text` | Chat by typing (no microphone needed) |
 | `jarvis --debug` | Verbose debug logging on the console |
 | `jarvis --benchmark` | Print per-stage latency after the session |
+| `jarvis --benchmark-models` | Benchmark `qwen3:8b` / `qwen3:1.7b` / `llama3.2:3b` on the same questions, score grounding + conciseness, and print a recommendation |
+| `jarvis --hardware` | Read-only CPU / RAM / GPU / Ollama / model-size report |
 | `jarvis --doctor` | Health check with fix instructions |
 | `jarvis --version` | Show the installed version |
 | `jarvis --startup enable` | Launch JARVIS automatically at Windows login |
@@ -219,15 +223,18 @@ A complete health check that never crashes:
   [✓] Piper  piper-tts installed
   [✓] Voice model  C:\Users\YOU\JARVIS\voices\en_US-lessac-medium.onnx
   [✓] Ollama  http://localhost:11434
-  [✓] Selected LLM  qwen3:8b
+  [✓] Selected LLM  qwen3:1.7b
+  [✓] Ollama streaming  enabled (sentence-by-sentence TTS)
+  [✓] Thinking (reasoning)  disabled (recommended for voice)
+  [✓] Model kept alive  qwen3:1.7b loaded (keep_alive 30m)
   [✓] Required directories  voices/, outputs/, data/ present
   [✓] Dependencies  all core packages importable
   [✓] Configuration  .env at C:\Users\YOU\JARVIS\.env
-  [✓] Web search  not configured — set SEARCH_API_KEY in .env (optional)
-  [✓] Search API  not configured (optional)
+  [✓] Web search  tavily (configured)
+  [✓] Search API  configured
   [✓] Common applications  notepad ✓, calculator ✓, chrome ✓, edge ✓, explorer ✓
 ---------------------------------------------
-  All 14 checks passed. JARVIS is ready.
+  All 18 checks passed. JARVIS is ready.
 ```
 
 Web search is **optional**: without a `SEARCH_API_KEY` the doctor still passes and JARVIS runs in `AI_MODE=local` / answers current-information questions with an honest "couldn't verify" instead of a stale guess.
@@ -249,12 +256,15 @@ Everything is centralized in `config.py` and read from `.env` (see [`.env.exampl
 | Key | Default | Meaning |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Your local Ollama server |
-| `OLLAMA_MODEL` | `qwen3:8b` | The AI brain — see [Performance](#-performance) for faster CPU options |
+| `OLLAMA_MODEL` | `qwen3:8b` | Baseline AI brain — see [Performance](#-performance) for faster CPU options |
+| `JARVIS_MODEL_MODE` | `quality` | `fast` → `OLLAMA_FAST_MODEL` \| `quality` → `OLLAMA_QUALITY_MODEL` (each falls back to `OLLAMA_MODEL`) |
+| `OLLAMA_FAST_MODEL` | *(empty)* | Model used in fast mode (e.g. `qwen3:1.7b`) |
+| `OLLAMA_QUALITY_MODEL` | *(empty)* | Model used in quality mode (e.g. `qwen3:8b`) |
 | `OLLAMA_THINK` | `false` | Suppress Qwen3 reasoning tokens for fast replies |
 | `OLLAMA_TIMEOUT` | `120` | Seconds to wait for a reply |
 | `OLLAMA_TEMPERATURE` | `0.7` | Creativity (0 strict → 1 wild) |
 | `OLLAMA_NUM_PREDICT` | `120` | Max response length (≈3–4 spoken sentences) |
-| `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays loaded in RAM |
+| `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays loaded in RAM (model warming) |
 | `WHISPER_MODEL` | `base` | Faster-Whisper size: `tiny` \| `base` \| `small` ... |
 | `WHISPER_COMPUTE_TYPE` | `int8` | `int8` for CPU, `float16` for CUDA |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
@@ -299,19 +309,25 @@ What already helps (all enabled by default):
 * **Streaming + sentence TTS** — the first sentence is spoken while the rest is still generating.
 * **Warm-up coordination** — the first question waits for the background load instead of racing it (no double cold-start).
 
-**If you want it faster, switch the model** — one line in `.env`, everything else identical:
+**Measure your own machine** with `jarvis --benchmark-models` — it runs the same 6 questions (conversation, knowledge, a current-info question answered from **mocked** Tavily results, and command-style) through every candidate and prints load time, prompt eval, first-token latency, tokens/sec, quality, and grounding.
 
-| Model | Speed (warm, CPU) | Notes |
-|---|---|---|
-| `qwen3:8b` | ~2.5 tok/s | Default — best quality |
-| `llama3.2:3b` | ~5.5 tok/s (**2.2× faster**) | Best quality/speed trade-off |
-| `qwen3:1.7b` | ~5.7 tok/s (**2.3× faster**) | Smallest, good for weak CPUs |
+Measured on this machine's CPU-only hardware (warm, all 3 models fully grounded on the web question):
+
+| Model | LOAD (s) | TTFT (s) | tok/s | Avg total (s) | Quality |
+|---|---|---|---|---|---|
+| `qwen3:8b` | 13.7 | 5.5 | 3.5 | 14.3 | 1.00 |
+| `qwen3:1.7b` | 5.0 | 3.3 | **14.4** (**4.1×**) | **5.3** | 1.00 |
+| `llama3.2:3b` | 6.4 | 3.9 | 8.4 (2.4×) | 8.2 | 0.99 |
+
+`qwen3:1.7b` matched `qwen3:8b` on quality **and** web grounding at ~4× the speed, so it is the recommended CPU model — set it once and keep `qwen3:8b` one switch away:
 
 ```
-OLLAMA_MODEL=llama3.2:3b
+JARVIS_MODEL_MODE=fast          # quality  → uses OLLAMA_QUALITY_MODEL
+OLLAMA_FAST_MODEL=qwen3:1.7b
+OLLAMA_QUALITY_MODEL=qwen3:8b   # OLLAMA_MODEL stays the baseline
 ```
 
-A GPU (or a smaller model) is required for sub-10-second replies — no client-side setting can make an 8B model generate faster on CPU.
+The recommendation is advisory only — `--benchmark-models` never changes your configuration. A GPU (or a smaller model) is required for sub-10-second replies — no client-side setting can make an 8B model generate faster on CPU.
 
 Per-stage timings are logged to `jarvis.log` (`[timing] ...`) and `jarvis --doctor` now reports streaming / thinking / keep-alive status.
 
@@ -337,6 +353,8 @@ Anything the router doesn't match is sent to **qwen3:8b** for a conversational a
 | "Shut down / restart / sleep my computer" | **Asks for confirmation first**, runs only after an explicit "yes" |
 | "Abort shutdown" | Cancels a scheduled shutdown |
 | "Stop speaking" | Interrupts TTS immediately |
+| "Switch to fast mode" / "Use the quality model" | Switches the active Ollama model at runtime — no restart, no LLM round-trip (see `JARVIS_MODEL_MODE`) |
+| "Which model are you using?" | Reports the current mode + model |
 | "Who is the current CM of AP?" | **Web search** — answered from verified results with sources shown in the terminal |
 | "What is the latest news?" | **Web search** — current information |
 | "Clear memory" | Forgets the conversation |
@@ -378,7 +396,7 @@ The test suite runs entirely with mocks — no microphone, speakers, or AI serve
 .\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-169 tests cover configuration, routing, the question classifier, web-search providers (mocked HTTP), commands + permission levels, Ollama (mocked HTTP), memory, VAD, STT, TTS, microphone detection, the doctor, the CLI, wake-name normalization, and shutdown behavior.
+351 tests cover configuration, routing, the question classifier, web-search providers (mocked HTTP), commands + permission levels, Ollama (mocked HTTP), memory, VAD, STT, TTS, microphone detection, the doctor, the CLI, wake-name normalization, model-mode selection, the model benchmark, the hardware report, and shutdown behavior.
 
 ---
 
@@ -441,8 +459,10 @@ JARVIS/
 ├── .env.example            # Template with defaults & comments
 ├── jarvis_cli/             # The `jarvis` command
 │   ├── __main__.py         # Entry point (run from any directory)
-│   ├── __init__.py         # CLI: --help/--version/--doctor/--debug/...
-│   ├── doctor.py           # 11-point health check
+│   ├── __init__.py         # CLI: --help/--version/--doctor/--benchmark-models/--hardware/...
+│   ├── doctor.py           # 18-point health check
+│   ├── benchmark.py        # `--benchmark-models`: compare models + recommend
+│   ├── hardware.py         # `--hardware`: CPU/RAM/GPU/Ollama report
 │   └── startup.py          # Windows auto-start enable/disable
 ├── brain/                  # The brain
 │   ├── llm.py              # Provider-agnostic AI layer (LLMProvider + factory)

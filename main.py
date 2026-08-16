@@ -27,7 +27,7 @@ import time
 import threading
 
 # ── Config ────────────────────────────────────────────────────
-from config import jarvis_config, tts_config
+from config import jarvis_config, ollama_config, tts_config
 
 # ── Engine ────────────────────────────────────────────────────
 from engine.microphone import MicrophoneManager
@@ -171,6 +171,11 @@ class JARVIS:
 
         self.running = False
 
+        # Active model mode (fast/quality). Starts from .env and can be
+        # changed at runtime with a voice command ("switch to fast
+        # mode") without restarting JARVIS.
+        self.model_mode = (jarvis_config.MODEL_MODE or "quality").strip().lower()
+
         # Optional rich terminal dashboard (issue: polished real-time
         # interface). Only created when rich is importable.
         self.ui = None
@@ -203,9 +208,17 @@ class JARVIS:
             return False
 
     def _start_warmup(self) -> None:
+        """Pre-load the configured model in the background at startup."""
+        self._warmup_model()
+
+    def _warmup_model(self) -> None:
         """
-        Pre-load the model in a background thread so the first
-        real question has no cold-start delay.
+        Pre-load the provider's current model in a background thread so
+        the first real question has no cold-start delay.
+
+        Used at startup and after a runtime model-mode switch. A fresh
+        event is created per load so a completed earlier warm-up never
+        makes the next one return immediately.
         """
         if not jarvis_config.ENABLE_WARMUP:
             logger.info("Warm-up disabled (ENABLE_WARMUP=false).")
@@ -219,6 +232,10 @@ class JARVIS:
         if warmup is None:
             self._warmup_done.set()
             return
+
+        # Fresh event: the old one may already be set from an earlier
+        # load (startup warm-up or a previous mode switch).
+        self._warmup_done = threading.Event()
 
         def _run_warmup() -> None:
             try:
@@ -598,6 +615,81 @@ class JARVIS:
         if result.response:
             self.speak(result.response)
 
+    # ── Runtime model-mode control (fast / quality) ───────────
+
+    def switch_model_mode(self, mode: str) -> str:
+        """
+        Switch the active model mode at runtime (fast/quality).
+
+        Resolves the target model from .env config, switches the
+        provider's active model, and pre-loads it in the background so
+        the next question has no cold-start delay.
+
+        Returns the new model name, or '' when the switch could not be
+        made (unknown mode, unconfigured model, provider limitation).
+        """
+        mode = (mode or "").strip().lower()
+        if mode not in ("fast", "quality"):
+            logger.warning(f"Unknown model mode: {mode!r}")
+            return ""
+        try:
+            target = ollama_config.resolve_model(mode)
+        except Exception as e:
+            logger.warning(f"Cannot resolve model for mode {mode!r}: {e}")
+            return ""
+        if not target:
+            return ""
+
+        current = getattr(self.provider, "model", None)
+        if current == target:
+            self.model_mode = mode
+            return target
+
+        switcher = getattr(self.provider, "switch_model", None)
+        if switcher is None:
+            logger.warning(
+                "Provider cannot switch models at runtime "
+                f"({getattr(self.provider, 'name', '?')})."
+            )
+            return ""
+        try:
+            switcher(target)
+        except Exception as e:
+            logger.warning(f"Runtime model switch failed: {e}")
+            return ""
+        self.model_mode = mode
+        self._warmup_model()
+        return target
+
+    def handle_model_mode(self, mode_request: str) -> None:
+        """Handle a runtime model-mode request: "fast" | "quality" |
+        "status". Routed here deterministically (no LLM round-trip)."""
+        if mode_request == "status":
+            mode = self.model_mode or (jarvis_config.MODEL_MODE or "quality")
+            model = getattr(self.provider, "model", "") or ""
+            if not model:
+                model = ollama_config.resolve_model(mode)
+            self.speak(f"I am running in {mode} mode with {model}.")
+            return
+
+        previous = self.model_mode
+        target = self.switch_model_mode(mode_request)
+        if not target:
+            self.speak(
+                f"I couldn't switch to {mode_request} mode. "
+                "Check OLLAMA_FAST_MODEL and OLLAMA_QUALITY_MODEL "
+                "in the env file."
+            )
+            return
+        if previous == mode_request:
+            self.speak(
+                f"I'm already using {target} in {mode_request} mode."
+            )
+        else:
+            self.speak(
+                f"Switched to {mode_request} mode. Using {target}."
+            )
+
     def process_input(self, user_input: str) -> bool:
         """
         Process one user input through the full pipeline.
@@ -683,6 +775,11 @@ class JARVIS:
         elif intent == Intent.STOP_SPEECH:
             # Interrupt TTS without routing through the AI.
             self.tts.stop()
+
+        elif intent == Intent.MODEL_MODE:
+            # Switch fast/quality model at runtime (no LLM, no restart).
+            self._ui_state("thinking", "switching model mode")
+            self.handle_model_mode(cleaned)
 
         elif intent == Intent.WEB_SEARCH:
             # Current-information question — answer from fresh search

@@ -1,6 +1,6 @@
 """Intent router tests — deterministic classification."""
 
-from brain.router import IntentRouter, Intent
+from brain.router import IntentRouter, Intent, parse_model_mode_request
 
 
 def test_exit_phrases():
@@ -93,3 +93,60 @@ def test_stop_speaking_intent():
     for phrase in ("stop speaking", "stop talking", "be quiet"):
         intent, _ = router.route(phrase)
         assert intent == Intent.STOP_SPEECH, f"expected STOP for {phrase!r}"
+
+
+# ── Runtime model-mode control ────────────────────────────────
+
+def test_model_mode_switch_phrases():
+    router = IntentRouter()
+    for phrase, expected in (
+        ("switch to fast mode", "fast"),
+        ("use the fast model", "fast"),
+        ("use the fast one", "fast"),
+        ("go fast mode", "fast"),
+        ("switch to quality mode", "quality"),
+        ("use the quality model", "quality"),
+        ("change to quality mode", "quality"),
+        ("set the model to fast", "fast"),
+        ("go into fast mode", "fast"),
+    ):
+        intent, cleaned = router.route(phrase)
+        assert intent == Intent.MODEL_MODE, f"expected MODEL_MODE for {phrase!r}"
+        assert cleaned == expected, f"wrong mode for {phrase!r}"
+
+
+def test_model_mode_status_phrases():
+    router = IntentRouter()
+    for phrase in (
+        "which model are you using",
+        "what model are you running",
+        "what model are you on",
+        "what model do you use",
+        "what mode are you in",
+    ):
+        intent, cleaned = router.route(phrase)
+        assert intent == Intent.MODEL_MODE, f"expected MODEL_MODE for {phrase!r}"
+        assert cleaned == "status"
+
+
+def test_non_model_mode_phrases_stay_ai():
+    """Unknown modes and ordinary questions must NOT be swallowed."""
+    router = IntentRouter()
+    for phrase in (
+        "switch to turbo mode",
+        "use the banana model",
+        "explain fast mode",
+        "what is fast mode",
+        "which model is better for gaming",
+    ):
+        intent, _ = router.route(phrase)
+        assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
+
+
+def test_parse_model_mode_request():
+    assert parse_model_mode_request("switch to fast mode") == "fast"
+    assert parse_model_mode_request("use the quality model") == "quality"
+    assert parse_model_mode_request("which model are you using") == "status"
+    assert parse_model_mode_request("what is python") is None
+    assert parse_model_mode_request("") is None
+    assert parse_model_mode_request(None) is None
