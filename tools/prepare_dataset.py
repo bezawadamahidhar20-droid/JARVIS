@@ -18,8 +18,15 @@ from typing import List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402
 from utils.dataset import ConversationDataset  # noqa: E402
+
+# Defaults (no longer read from config.py, which has no DATASET_PATH
+# / SYSTEM_PROMPT attributes).
+DATASET_PATH = "data/conversations.jsonl"
+SYSTEM_PROMPT = (
+    "You are JARVIS, a concise British AI butler. "
+    "Answer in 1 to 3 short sentences."
+)
 
 
 def dedupe(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
@@ -52,7 +59,7 @@ def to_sharegpt(pairs: List[Tuple[str, str]], system_prompt: str) -> list:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", default=config.DATASET_PATH)
+    parser.add_argument("--input", default=DATASET_PATH)
     parser.add_argument("--output", default="data/dataset.json")
     parser.add_argument("--min-pairs", type=int, default=20,
                         help="abort if fewer real pairs than this")
@@ -71,7 +78,7 @@ def main() -> int:
               "meaningful fine-tune. Keep talking to JARVIS.")
         return 1
 
-    entries = to_sharegpt(pairs, config.SYSTEM_PROMPT)
+    entries = to_sharegpt(pairs, SYSTEM_PROMPT)
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as fh:
         json.dump(entries, fh, ensure_ascii=False, indent=2)

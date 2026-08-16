@@ -2,21 +2,29 @@
 brain/router.py — Intent Router
 
 Decides whether user input is:
-  1. A system COMMAND  (open app, time, date, screenshot)
-  2. An AI QUESTION    (route to Qwen3 via Ollama)
-  3. EXIT              (shut down JARVIS)
-  4. CLEAR_MEMORY      (reset conversation context)
-  5. FAST_RESPONSE     (instant canned reply to a greeting)
+  1. A system COMMAND    (open app, time, date, screenshot, status, ...)
+  2. A WEB_SEARCH        (current information — needs fresh facts)
+  3. An AI QUESTION      (route to Qwen3 via Ollama)
+  4. EXIT                (shut down JARVIS)
+  5. CLEAR_MEMORY        (reset conversation context)
+  6. FAST_RESPONSE       (instant canned reply to a greeting)
+  7. STOP_SPEECH         (interrupt TTS output)
 
 CRITICAL RULE:
-Anything that is NOT matched as a command becomes an
-AI_QUESTION. This is the fix that makes JARVIS actually
-answer normal questions instead of saying
+Anything that is NOT matched as a command, a web-search question, or a
+fast response becomes an AI_QUESTION. This is the fix that makes JARVIS
+actually answer normal questions instead of saying
 "I don't understand".
+
+Current-information questions are detected by QuestionClassifier
+(brain/classifier.py) and routed to WEB_SEARCH instead of the local LLM,
+so JARVIS never answers "who is the current ..." from stale training
+data (see AI_MODE in .env: auto | local | web).
 """
 
 import re
 from typing import Tuple, List, Pattern
+
 from utils.logger import get_logger
 
 logger = get_logger("router")
@@ -26,9 +34,11 @@ class Intent:
     """Intent type constants."""
     COMMAND = "command"
     AI_QUESTION = "ai_question"
+    WEB_SEARCH = "web_search"
     CLEAR_MEMORY = "clear_memory"
     EXIT = "exit"
     FAST_RESPONSE = "fast_response"
+    STOP_SPEECH = "stop_speech"
     UNKNOWN = "unknown"
 
 
@@ -60,7 +70,9 @@ _FAST_TEMPLATES: dict = {
     "thanks jarvis": "You're welcome, {owner}.",
     "thank you jarvis": "You're welcome, {owner}.",
     "how are you": "I'm running at full capacity, {owner}. How can I help?",
+    "how are you today": "I'm running at full capacity, {owner}. How can I help?",
     "how are you doing": "All systems nominal, {owner}.",
+    "how are you doing today": "All systems nominal, {owner}.",
     "how is it going": "All systems nominal, {owner}.",
     "hows it going": "All systems nominal, {owner}.",
     "whats up": "Just monitoring the house, {owner}. How can I help?",
@@ -83,43 +95,78 @@ FAST_RESPONSES: dict = {
 }
 
 
-class IntentRouter:
+# ── Wake-name normalization ───────────────────────────────────
+# Whisper sometimes hears the assistant's name as a near-homophone
+# ("jervis", "lajav", "lajad", ...). We normalize those variants to
+# "jarvis" ONLY when they appear in *address position* (start of the
+# utterance, or right after a comma / pause word like "so"/"hey").
+# Ordinary sentences are never altered, and the raw transcription is
+# kept in the debug log.
+_WAKE_VARIANTS_RE = re.compile(
+    r"\b(jervis|lajav|lajad|jarivs|jerivs|jarvis)\b",
+    re.IGNORECASE,
+)
+_PAUSE_WORDS = (
+    "so", "hey", "hi", "hello", "yo", "okay", "ok", "please",
+    "now", "right", "well", "alright",
+)
+
+
+def _is_address_position(prefix: str) -> bool:
+    """True when a wake-variant at this position is used as a name."""
+    p = prefix.strip()
+    if not p:
+        return True  # start of the utterance
+    if p[-1] in ",;:!?.":
+        return True  # after a pause / comma ("so, lajad, ...")
+    last_word = re.sub(r"[^a-z']", "", p.split()[-1].lower()) if p.split() else ""
+    return last_word in _PAUSE_WORDS
+
+
+def normalize_wake_name(text: str) -> str:
     """
-    Routes user input to the correct handler.
-    Defaults to AI so no question ever goes unanswered.
+    Rewrite misrecognized variants of JARVIS's name to "jarvis", but
+    only in address position. Returns the text unchanged otherwise.
     """
+    if not text or not text.strip():
+        return text
+    out: list[str] = []
+    last = 0
+    for m in _WAKE_VARIANTS_RE.finditer(text):
+        prefix = text[last:m.start()]
+        if _is_address_position(prefix):
+            out.append(prefix)
+            out.append("jarvis")
+            last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 
-    # ── Exit phrases ──────────────────────────────────────────
-    EXIT_PATTERNS: List[str] = [
-        r'\b(exit|quit|goodbye|good bye|bye jarvis|'
-        r'shut ?down jarvis|stop jarvis|terminate)\b',
-        r'^\s*bye\s*$',
-    ]
 
-    # ── Memory clear phrases ──────────────────────────────────
-    MEMORY_PATTERNS: List[str] = [
-        r'\b(clear|reset|wipe|erase)\s+'
-        r'(the\s+)?(memory|history|context|conversation)\b',
-        r'\bforget\s+(everything|all|our conversation)\b',
-        r'\bstart\s+(over|fresh|a new conversation)\b',
-    ]
+def _build_command_patterns() -> List[str]:
+    """
+    Build the router's COMMAND_PATTERNS from the trusted vocabulary in
+    commands/system_commands.py (apps, sites, folders) plus fixed
+    patterns for time, date, screenshot, volume, status, lock, power.
+    """
+    from commands.system_commands import APP_NAMES, FOLDER_NAMES, SITE_NAMES
 
-    # ── System command phrases ────────────────────────────────
-    # Keep this list tight. When in doubt let the AI handle it.
-    COMMAND_PATTERNS: List[str] = [
+    def _alt(names) -> str:
+        return "|".join(re.escape(n) for n in names)
+
+    app_alt = _alt(APP_NAMES)
+    site_alt = _alt(SITE_NAMES)
+    folder_alt = _alt(FOLDER_NAMES)
+
+    return [
         # Launch desktop applications
-        r'\b(open|launch|start|run)\s+'
-        r'(chrome|firefox|edge|browser|notepad|calculator|'
-        r'calc|paint|word|excel|powerpoint|vlc|spotify|'
-        r'discord|whatsapp|telegram|steam|file explorer|'
-        r'explorer|task manager|command prompt|cmd|'
-        r'powershell|terminal|settings)\b',
+        rf'\b(open|launch|start|run)\s+(the\s+)?({app_alt})\b',
 
         # Open websites
-        r'\b(open|go to|visit|navigate to|launch)\s+'
-        r'(youtube|google|github|stack ?overflow|reddit|'
-        r'twitter|instagram|facebook|linkedin|netflix|'
-        r'amazon|gmail|chatgpt)\b',
+        rf'\b(open|go to|visit|navigate to|launch)\s+'
+        rf'(the\s+)?({site_alt})\b',
+
+        # Open folders
+        rf'\b(open|launch|show)\s+(my\s+|the\s+)?({folder_alt})\s*(folder)?\b',
 
         # Time and date (read from system clock, not AI)
         r'\bwhat(?:\'s| is)?\s+(the\s+)?'
@@ -131,16 +178,65 @@ class IntentRouter:
         # Screenshot
         r'\b(take a |take )?screenshot\b',
 
-        # Media and volume control
+        # Volume control
         r'\b(volume (up|down|mute|unmute))\b',
-        r'\b(increase|decrease|set)\s+(volume|brightness)\b',
-        r'\b(play|pause|next track|previous track)\b',
+        r'\b(increase|raise|decrease|lower|turn (up|down))\s+'
+        r'(the\s+)?volume\b',
+        r'\bset\s+(the\s+)?volume\s+to\s+\d{1,3}\s*(percent|%)?\b',
+        r'\b(mute|unmute)\s+(the\s+)?(volume|sound|audio)\b',
 
-        # System power
-        r'\b(shut ?down|restart|reboot|sleep|lock)\s+'
-        r'(the\s+)?(computer|pc|system|laptop|machine)\b',
-        r'\b(abort|cancel)\s+shut ?down\b',
+        # System status
+        r'\b(system status|computer status|pc status|system info|'
+        r'system information|system health|how is my computer|'
+        r'how is the computer)\b',
+
+        # Lock screen
+        r'\block\s+(my\s+|the\s+)?(computer|pc|laptop|system|machine|screen)\b',
+
+        # System power (shutdown/restart/sleep — confirmation handled by
+        # the registry's CONFIRM permission)
+        r'\b(shut ?down|power off|restart|reboot|sleep|hibernate)\s+'
+        r'(my\s+|the\s+)?(computer|pc|system|laptop|machine)\b',
+        r'\b(abort|cancel|stop)\s+shut ?down\b',
+
+        # Media control (kept for compatibility; the registry politely
+        # declines rather than pretending)
+        r'\b(play|pause|next track|previous track)\b',
     ]
+
+
+class IntentRouter:
+    """
+    Routes user input to the correct handler.
+    Defaults to AI so no question ever goes unanswered.
+    """
+
+    # ── Exit phrases ──────────────────────────────────────────
+    EXIT_PATTERNS: List[str] = [
+        r'\b(exit|quit|goodbye|good bye|bye jarvis|'
+        r'shut ?down jarvis|stop jarvis|close jarvis|terminate)\b',
+        r'^\s*bye\s*$',
+    ]
+
+    # ── Memory clear phrases ──────────────────────────────────
+    MEMORY_PATTERNS: List[str] = [
+        r'\b(clear|reset|wipe|erase)\s+'
+        r'(the\s+)?(memory|history|context|conversation)\b',
+        r'\bforget\s+(everything|all|our conversation)\b',
+        r'\bstart\s+(over|fresh|a new conversation)\b',
+    ]
+
+    # ── Stop speaking ─────────────────────────────────────────
+    STOP_PATTERNS: List[str] = [
+        r'\b(stop|halt|cancel|silence)\s+'
+        r'(speaking|talking|the voice|speech|that|generation|generating)\b',
+        r'\bbe quiet\b',
+    ]
+
+    # ── System command phrases ────────────────────────────────
+    # Built from the command vocabulary (commands/system_commands.py)
+    # so the router and the registry can never drift apart.
+    COMMAND_PATTERNS: List[str] = _build_command_patterns()
 
     def __init__(self):
         self._exit_re: List[Pattern] = [
@@ -151,10 +247,17 @@ class IntentRouter:
             re.compile(p, re.IGNORECASE)
             for p in self.MEMORY_PATTERNS
         ]
+        self._stop_re: List[Pattern] = [
+            re.compile(p, re.IGNORECASE)
+            for p in self.STOP_PATTERNS
+        ]
         self._command_re: List[Pattern] = [
             re.compile(p, re.IGNORECASE)
             for p in self.COMMAND_PATTERNS
         ]
+        from brain.classifier import QuestionClassifier
+
+        self.classifier = QuestionClassifier()
         logger.info("Intent router initialized.")
 
     def route(self, user_input: str) -> Tuple[str, str]:
@@ -170,7 +273,15 @@ class IntentRouter:
         if not user_input or not user_input.strip():
             return Intent.UNKNOWN, ""
 
-        text = user_input.strip().lower()
+        # Normalize wake-name misrecognitions ("lajad" -> "jarvis"),
+        # keeping the raw transcription in the debug log.
+        normalized = normalize_wake_name(user_input)
+        if normalized != user_input:
+            logger.debug(
+                f"Wake-name normalization: {user_input!r} -> {normalized!r}"
+            )
+
+        text = normalized.strip().lower()
 
         # 1 — Exit has highest priority
         if self._matches(text, self._exit_re):
@@ -189,12 +300,29 @@ class IntentRouter:
                 logger.info(f"Intent FAST_RESPONSE: '{text}'")
                 return Intent.FAST_RESPONSE, reply
 
-        # 4 — System commands
+        # 4 — Stop speaking (interrupt TTS)
+        if self._matches(text, self._stop_re):
+            logger.info(f"Intent STOP_SPEECH: '{text}'")
+            return Intent.STOP_SPEECH, text
+
+        # 5 — System commands
         if self._matches(text, self._command_re):
             logger.info(f"Intent COMMAND: '{text}'")
             return Intent.COMMAND, text
 
-        # 5 — DEFAULT: send everything else to the AI brain
+        # 6 — Question classifier: current information needs a web search
+        decision = self.classifier.classify(text)
+        if decision == "web_search":
+            logger.info(f"Intent WEB_SEARCH: '{text}'")
+            return Intent.WEB_SEARCH, text
+
+        # 7 — Deterministic clock/calendar the command patterns missed
+        #     ("what day is today", "what is today date", ...)
+        if decision in ("time_tool", "date_tool"):
+            logger.info(f"Intent COMMAND (clock): '{text}'")
+            return Intent.COMMAND, text
+
+        # 8 — DEFAULT: send everything else to the AI brain
         logger.info(f"Intent AI_QUESTION: '{text}'")
         return Intent.AI_QUESTION, text
 

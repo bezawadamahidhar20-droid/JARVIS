@@ -1,7 +1,10 @@
 """
-brain/ollama_client.py — Ollama / llama3.2:3b integration
+brain/ollama_client.py — Ollama integration (configurable model)
 
-Speed optimizations applied (llama3.2:3b on CPU):
+Implements the LLMProvider interface (brain/llm.py) so JARVIS can
+swap in other providers later without rewriting the assistant.
+
+Speed optimizations (qwen3:8b / llama3.2 on CPU):
   1. keep_alive: 30m       — keeps model loaded in RAM
   2. num_predict: 150      — limits response length
   3. num_ctx: 2048         — smaller context = faster processing
@@ -10,9 +13,8 @@ Speed optimizations applied (llama3.2:3b on CPU):
   6. stream: True          — tokens arrive as they are generated, so
                              the first sentence can be spoken while the
                              rest of the answer is still being written
-
-NOTE: llama3.2 has NO thinking mode, so no "think" field or /no_think
-suffix is sent (that was Qwen-only).
+  7. think: False          — Qwen3's reasoning tokens are suppressed,
+                             cutting response latency dramatically
 
 ask_stream() emits each complete sentence to on_sentence() as it
 finishes; ask() remains for --text mode / non-streaming callers.
@@ -24,6 +26,7 @@ import time
 import requests
 from typing import Optional, List, Dict, Callable
 from utils.logger import get_logger
+from brain.llm import LLMProvider
 
 logger = get_logger("ollama_client")
 
@@ -39,11 +42,12 @@ try:
     OLLAMA_NUM_CTX     = ollama_config.NUM_CTX
     OLLAMA_KEEP_ALIVE  = ollama_config.KEEP_ALIVE
     OLLAMA_NUM_GPU     = ollama_config.NUM_GPU
+    OLLAMA_THINK       = ollama_config.THINK
     OWNER              = jarvis_config.OWNER
 except Exception as e:
     logger.warning(f"Config load failed, using defaults: {e}")
     OLLAMA_BASE_URL    = "http://localhost:11434"
-    OLLAMA_MODEL       = "llama3.2:3b"
+    OLLAMA_MODEL       = "qwen3:8b"
     OLLAMA_TIMEOUT     = 120
     OLLAMA_TEMP        = 0.7
     OLLAMA_STREAM      = True
@@ -51,6 +55,7 @@ except Exception as e:
     OLLAMA_NUM_CTX     = 2048
     OLLAMA_KEEP_ALIVE  = "30m"
     OLLAMA_NUM_GPU     = 99
+    OLLAMA_THINK       = False
     OWNER              = "Sir"
 
 # ── Short system prompt (<60 words, fewer tokens = faster) ────
@@ -63,18 +68,37 @@ SYSTEM_PROMPT = (
     f"Never refuse to answer a normal question."
 )
 
+# System prompt used when answering from verified web-search results.
+# ``{context}`` is replaced with the formatted search results.
+SEARCH_SYSTEM_PROMPT = (
+    f"You are JARVIS, a concise British AI butler. "
+    f"Address the user as {OWNER}. "
+    "Answer the user's question using ONLY the verified search "
+    "information provided below. Do not invent facts. Do not use your "
+    "training memory to override the search information. If the "
+    "information does not contain enough evidence to answer, say the "
+    "information could not be verified. If sources disagree, state the "
+    "uncertainty. Answer in 1 to 3 short sentences. No bullet points. "
+    "No preamble.\n\n"
+    "VERIFIED SEARCH INFORMATION:\n{context}"
+)
+
 # A sentence ends at . ! ? (followed by whitespace or end) or a newline.
-_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)|\\n")
+# NOTE: must be "\n" (real newline) — "\\n" would match a literal
+# backslash-n and newline-splitting would silently never fire.
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)|\n")
 # Safety valve: if a chunk of text is this long with no sentence end,
 # emit it anyway so speech never stalls on run-on text.
 MAX_PARTIAL_CHARS = 200
 
 
-class OllamaClient:
+class OllamaClient(LLMProvider):
     """
-    Client for local Ollama server running llama3.2:3b.
+    Client for a local Ollama server (configurable model).
     Optimized for low latency voice assistant use.
     """
+
+    name = "ollama"
 
     def __init__(
         self,
@@ -86,7 +110,8 @@ class OllamaClient:
         num_predict: int = None,
         num_ctx: int = None,
         keep_alive=None,
-        num_gpu: int = None
+        num_gpu: int = None,
+        think: bool = None
     ):
         self.base_url    = base_url      or OLLAMA_BASE_URL
         self.model       = model         or OLLAMA_MODEL
@@ -97,7 +122,12 @@ class OllamaClient:
         self.num_ctx     = num_ctx       if num_ctx is not None else OLLAMA_NUM_CTX
         self.keep_alive  = keep_alive    or OLLAMA_KEEP_ALIVE
         self.num_gpu     = num_gpu       if num_gpu is not None else OLLAMA_NUM_GPU
+        self.think       = think         if think is not None else OLLAMA_THINK
         self._verify_connection()
+
+    def describe(self) -> str:
+        """Short status string for `jarvis --doctor`."""
+        return f"{self.model} @ {self.base_url}"
 
     # ── Connection check ──────────────────────────────────────
 
@@ -172,6 +202,10 @@ class OllamaClient:
                 ],
                 "stream": False,
                 "keep_alive": self.keep_alive,
+                # Match the real request: suppress Qwen3 reasoning so the
+                # loaded state is identical (think:true would load extra
+                # reasoning machinery / template state).
+                "think": self.think if self.think is not None else False,
                 "options": {
                     "num_predict": 1,
                     # Must match the real request's num_ctx, otherwise
@@ -197,7 +231,8 @@ class OllamaClient:
         self,
         user_input: str,
         memory=None,
-        on_sentence: Callable[[str], None] = None
+        on_sentence: Callable[[str], None] = None,
+        context: Optional[str] = None,
     ) -> Optional[str]:
         """
         Ask llama and stream tokens back as they are generated.
@@ -210,6 +245,7 @@ class OllamaClient:
             user_input  : the user's question or statement
             memory      : ConversationMemory instance
             on_sentence : callback(sentence_text) for each complete sentence
+            context     : optional verified search results to answer from
 
         Returns:
             str  : full JARVIS response text
@@ -218,8 +254,13 @@ class OllamaClient:
         if not user_input or not user_input.strip():
             return None
 
-        messages = self._build_messages(user_input, memory)
+        t_build = time.perf_counter()
+        messages = self._build_messages(user_input, memory, context=context)
         payload = self._build_payload(messages, stream=True)
+        logger.debug(
+            f"[timing] prompt build {(time.perf_counter() - t_build) * 1000:.0f}ms "
+            f"({len(messages)} messages)"
+        )
 
         logger.info(
             f"Asking [{self.model}]: '{user_input[:60]}'"
@@ -238,7 +279,8 @@ class OllamaClient:
     def ask(
         self,
         user_input: str,
-        memory=None
+        memory=None,
+        context: Optional[str] = None,
     ) -> Optional[str]:
         """
         Send a message to llama and return the full response.
@@ -247,6 +289,7 @@ class OllamaClient:
         Args:
             user_input : the user's question or statement
             memory     : ConversationMemory instance
+            context    : optional verified search results to answer from
 
         Returns:
             str  : JARVIS response text
@@ -255,8 +298,13 @@ class OllamaClient:
         if not user_input or not user_input.strip():
             return None
 
-        messages = self._build_messages(user_input, memory)
+        t_build = time.perf_counter()
+        messages = self._build_messages(user_input, memory, context=context)
         payload = self._build_payload(messages, stream=False)
+        logger.debug(
+            f"[timing] prompt build {(time.perf_counter() - t_build) * 1000:.0f}ms "
+            f"({len(messages)} messages)"
+        )
 
         start_time = time.perf_counter()
 
@@ -460,7 +508,8 @@ class OllamaClient:
     def _build_messages(
         self,
         user_input: str,
-        memory
+        memory,
+        context: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
         Build the message list for Ollama.
@@ -469,11 +518,19 @@ class OllamaClient:
         so if it is the last entry we reuse it instead of duplicating
         it (fixes the old duplicate-user-message bug that doubled the
         prompt tokens on every request).
+
+        When ``context`` (verified search results) is provided, the
+        system prompt instructs the model to answer only from it.
         """
         user_text = user_input.strip()
 
+        if context:
+            system_prompt = SEARCH_SYSTEM_PROMPT.format(context=context)
+        else:
+            system_prompt = SYSTEM_PROMPT
+
         if memory is not None:
-            ctx = memory.get_context_for_ollama(SYSTEM_PROMPT)
+            ctx = memory.get_context_for_ollama(system_prompt)
             if (
                 ctx
                 and ctx[-1]["role"] == "user"
@@ -484,7 +541,7 @@ class OllamaClient:
             return ctx
 
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ]
 
@@ -494,7 +551,7 @@ class OllamaClient:
         stream: bool
     ) -> dict:
         """Build the optimized /api/chat payload for llama."""
-        return {
+        payload = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
@@ -520,6 +577,11 @@ class OllamaClient:
                 "repeat_penalty": 1.1,
             },
         }
+        # Qwen3 emits reasoning tokens unless "think" is explicitly
+        # disabled. Suppress them for fast voice replies.
+        if self.think is not None:
+            payload["think"] = self.think
+        return payload
 
     # ── Response cleaning ─────────────────────────────────────
 

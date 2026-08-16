@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# jarvis — Unix launcher (Linux / macOS / WSL)
+# Installed by setup.sh into a directory on your PATH.
+# Windows users: use install.ps1 and the jarvis.cmd shim instead.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -n "${JARVIS_HOME:-}" ]; then
+    ROOT="$JARVIS_HOME"
+fi
+
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "[ERROR] JARVIS virtual environment not found at $ROOT/.venv" >&2
+    echo "        Run  bash setup.sh  inside the repository first." >&2
+    exit 1
+fi
+
+exec "$PY" -X utf8 "$ROOT/jarvis_cli/__main__.py" "$@"

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # setup.sh — one-command JARVIS setup for Linux / macOS / WSL
 # Usage:  bash setup.sh
+#
+# Installs dependencies into .venv and puts the `jarvis` command on
+# your PATH so you can start JARVIS from any directory.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 PYTHON_MIN_MAJOR=3
 PYTHON_MIN_MINOR=10
 
-# ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; RST='\033[0m'
 info()  { echo -e "${GRN}[+]${RST} $*"; }
 warn()  { echo -e "${YLW}[!]${RST} $*"; }
@@ -37,28 +39,48 @@ done
 
 [ -z "$PYTHON" ] && error "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found. Install it first: https://www.python.org/downloads/"
 
-# ── 2. Create virtual environment ─────────────────────────────────────────────
-VENV_DIR=".venv"
-if [ -d "$VENV_DIR" ]; then
-    warn "Virtual environment '$VENV_DIR' already exists — skipping creation."
+# ── 2. Repository root ────────────────────────────────────────────────────────
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$ROOT/main.py" ] || error "main.py not found. Run setup.sh from the JARVIS repository root."
+cd "$ROOT"
+
+# ── 3. Create virtual environment ─────────────────────────────────────────────
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    warn "Virtual environment already exists — skipping creation."
 else
-    info "Creating virtual environment in '$VENV_DIR'..."
-    "$PYTHON" -m venv "$VENV_DIR"
+    info "Creating virtual environment in .venv..."
+    "$PYTHON" -m venv .venv
 fi
-
-# ── 3. Activate venv ──────────────────────────────────────────────────────────
 # shellcheck source=/dev/null
-source "$VENV_DIR/bin/activate"
-info "Virtual environment activated."
+source "$ROOT/.venv/bin/activate"
 
-# ── 4. Upgrade pip ────────────────────────────────────────────────────────────
+# ── 4. Upgrade pip + install dependencies ─────────────────────────────────────
 info "Upgrading pip..."
 pip install --quiet --upgrade pip
-
-# ── 5. Install pinned dependencies ────────────────────────────────────────────
-info "Installing dependencies from requirements.txt..."
+info "Installing dependencies from requirements.txt (this can take a while)..."
 pip install --quiet -r requirements.txt
 info "All dependencies installed."
+
+# ── 5. Install the `jarvis` command into PATH ─────────────────────────────────
+info "Installing the jarvis command..."
+chmod +x "$ROOT/jarvis"
+
+INSTALL_DIR=""
+for dir in "$HOME/.local/bin" "$HOME/bin" "/usr/local/bin"; do
+    if [ -d "$dir" ] && echo "$PATH" | grep -q "$dir"; then
+        INSTALL_DIR="$dir"
+        break
+    fi
+done
+
+if [ -n "$INSTALL_DIR" ]; then
+    cp "$ROOT/jarvis" "$INSTALL_DIR/jarvis"
+    info "Installed jarvis -> $INSTALL_DIR/jarvis"
+else
+    warn "No directory on your PATH found to install into."
+    warn "Add this to your shell profile and re-run setup.sh, or use:"
+    warn "    ln -s $ROOT/jarvis /usr/local/bin/jarvis"
+fi
 
 # ── 6. Check Ollama ───────────────────────────────────────────────────────────
 echo ""
@@ -80,21 +102,14 @@ else
     echo "      python -m piper.download_voices en_US-lessac-medium"
 fi
 
-# ── 8. Quick microphone sanity check ─────────────────────────────────────────
-echo ""
-info "Running microphone level check..."
-if python test_microphone_level.py 2>/dev/null; then
-    info "Microphone OK."
-else
-    warn "Microphone check failed or test script missing. Run manually:"
-    warn "    python test_microphone_level.py"
-fi
-
+# ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "=============================="
 echo "   Setup complete!"
 echo "=============================="
 echo ""
-echo "  Activate the venv :  source .venv/bin/activate"
-echo "  Start JARVIS      :  python main.py"
+echo "  Open a NEW terminal and type:" 
+echo "      jarvis"
+echo ""
+echo "  Other commands:  jarvis --doctor | --version | --text | --benchmark"
 echo ""

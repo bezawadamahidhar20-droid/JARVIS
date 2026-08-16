@@ -1,33 +1,49 @@
-"""Text-to-speech engine built on pyttsx3 (Windows SAPI5).
+"""Text-to-speech engine.
 
-Speed model:
-  * speak() is NON-BLOCKING. Sentences are pushed onto a queue and a
-    daemon worker thread speaks them one at a time. The main thread can
-    keep generating the next sentence while the current one plays.
-  * speak_blocking() queues text and waits until it is done. Used only
-    for farewells and anything that must complete before the process
-    exits.
+Primary backend: **Piper** (local neural TTS, ONNX voice). The voice
+model is loaded ONCE and reused for every sentence. Speech is
+synthesized in memory (no temp WAV files) and played through
+sounddevice.
+
+Fallback backend: **pyttsx3** (Windows SAPI5) — select it with
+TTS_ENGINE=pyttsx3 in .env.
+
+Speed / robustness model (kept from the old engine):
+  * speak() is NON-BLOCKING — sentences are pushed onto a queue and a
+    daemon worker thread speaks them one at a time.
+  * speak_blocking() queues text and waits until it is done (farewells).
   * wait() drains the queue — used before re-arming the microphone so
     JARVIS never hears its own voice (echo).
-
-Robustness:
-  * speak() NEVER raises: if the TTS engine is broken or re-initialisation
-    fails, the text is still printed to the console and JARVIS keeps running.
-  * The pyttsx3 engine is created on the worker thread (it must not be
-    shared across threads), and stop() is called from the caller thread
-    so it can interrupt a runAndWait() that the worker is blocked in.
-  * Markdown artefacts from the model are stripped before speaking.
+  * speak() NEVER raises: if the TTS engine is broken, the text is
+    still printed to the console and JARVIS keeps running.
 """
 
 import queue
 import re
 import threading
+import time
+
+import numpy as np
 
 from utils.logger import get_logger
 
 logger = get_logger("tts")
 
-# Strip common markdown artefacts that Qwen3 may sprinkle into replies.
+# ── Load config safely ────────────────────────────────────────
+try:
+    from config import tts_config
+
+    ENGINE = tts_config.ENGINE
+    VOICE_NAME = tts_config.VOICE
+    VOICE_PATH = tts_config.VOICE_PATH
+    RATE = tts_config.RATE
+except Exception:
+    ENGINE = "piper"
+    VOICE_NAME = "en_US-lessac-medium"
+    VOICE_PATH = ""
+    RATE = 200
+
+# Strip common markdown artefacts the model may sprinkle into replies.
 # Order matters: links first ("[text](url)" -> "text"), then the symbols.
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_SYMBOL_RE = re.compile(r"[*_`#>~]|(\{\d+:\w+\})")
@@ -44,16 +60,121 @@ def clean_for_speech(text: str) -> str:
     return " ".join(text.split())
 
 
-class TTSEngine:
-    """
-    Wraps pyttsx3 with a queue + daemon worker so ``speak()`` never
-    blocks the caller.
-    """
+def _resolve_voice_path() -> str | None:
+    """Return the path to the Piper ONNX voice, or None if missing."""
+    if VOICE_PATH:
+        return VOICE_PATH
+    from pathlib import Path
+
+    candidate = Path(__file__).parent.parent / "voices" / f"{VOICE_NAME}.onnx"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
+class PiperBackend:
+    """Piper synthesis + sounddevice playback. Voice loaded once."""
+
+    def __init__(self) -> None:
+        self._voice = None
+        self.rate = 22050
+
+    def load(self) -> bool:
+        """Load the Piper voice model (idempotent)."""
+        if self._voice is not None:
+            return True
+        path = _resolve_voice_path()
+        if not path:
+            logger.warning(
+                f"Piper voice '{VOICE_NAME}.onnx' not found in voices/. "
+                "Download it with: python -m piper.download_voices "
+                f"{VOICE_NAME}"
+            )
+            return False
+        try:
+            from piper import PiperVoice
+
+            self._voice = PiperVoice.load(path)
+            self.rate = self._voice.config.sample_rate
+            logger.info(f"Piper voice loaded: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load Piper voice: {e}")
+            self._voice = None
+            return False
+
+    def synthesize(self, text: str) -> np.ndarray:
+        """
+        Synthesize *text* into float32 mono audio (in memory).
+        """
+        if self._voice is None:
+            self.load()
+        if self._voice is None:
+            raise RuntimeError("Piper voice not available")
+
+        chunks = [
+            c.audio_float_array
+            for c in self._voice.synthesize(text)
+        ]
+        if not chunks:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(chunks)
+
+    def play(self, audio: np.ndarray) -> None:
+        """Play *audio* (float32, self.rate) and block until done."""
+        if audio is None or audio.size == 0:
+            return
+        import sounddevice as sd
+
+        sd.play(audio, self.rate)
+        sd.wait()
+
+
+class Pyttsx3Backend:
+    """pyttsx3 (Windows SAPI5) fallback backend."""
 
     def __init__(self, rate: int = 200) -> None:
-        self.rate: int = rate
-        self._engine = None  # lazily created on the worker thread
-        self._queue: "queue.Queue" = queue.Queue()
+        self.rate = rate
+        self._engine = None
+
+    def load(self) -> bool:
+        try:
+            import pyttsx3
+
+            self._engine = pyttsx3.init()
+            self._engine.setProperty("rate", self.rate)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to init pyttsx3: {e}")
+            self._engine = None
+            return False
+
+    def synthesize(self, text: str) -> np.ndarray:
+        # pyttsx3 speaks directly; nothing to synthesize here.
+        return np.array([], dtype=np.float32)
+
+    def play(self, audio: np.ndarray) -> None:
+        # Audio handled by the engine's own runAndWait().
+        raise NotImplementedError
+
+
+class TTSEngine:
+    """
+    Wraps the selected TTS backend with a queue + daemon worker so
+    ``speak()`` never blocks the caller.
+    """
+
+    def __init__(
+        self,
+        engine: str | None = None,
+        rate: int = RATE,
+        backend=None,
+    ) -> None:
+        self.engine_name = (engine or ENGINE).lower()
+        self.rate = rate
+        # ``backend`` is injected by tests to avoid real audio.
+        self._backend = backend if backend is not None else self._make_backend()
+        self._queue: queue.Queue = queue.Queue()
 
         self._worker = threading.Thread(
             target=self._worker_loop,
@@ -62,33 +183,41 @@ class TTSEngine:
         )
         self._worker.start()
 
+    def _make_backend(self):
+        if self.engine_name == "pyttsx3":
+            return Pyttsx3Backend(rate=self.rate)
+        return PiperBackend()
+
     # ── Engine lifecycle ──────────────────────────────────────
 
-    def _ensure_engine(self) -> None:
-        """Create the pyttsx3 engine if it doesn't exist yet."""
-        if self._engine is not None:
-            return
-        import pyttsx3
+    def load(self) -> bool:
+        """Load the voice model once at startup."""
+        return self._backend.load()
 
-        engine = pyttsx3.init()
-        engine.setProperty("rate", self.rate)
-        # Prefer a female voice (closer to JARVIS's tone) when one exists.
-        try:
-            for voice in engine.getProperty("voices"):
-                name = (voice.name or "").lower()
-                vid = (voice.id or "").lower()
-                if "female" in name or "zira" in vid:
-                    engine.setProperty("voice", voice.id)
-                    break
-        except Exception:
-            pass  # voice selection is a nicety, never a hard requirement
-        self._engine = engine
-
-    def _say(self, clean: str) -> None:
+    def _speak_backend(self, clean: str) -> None:
         """Speak one already-cleaned string (blocking)."""
-        self._ensure_engine()
-        self._engine.say(clean)
-        self._engine.runAndWait()
+        backend = self._backend
+
+        if self.engine_name == "pyttsx3":
+            if backend._engine is None:  # noqa: SLF001
+                backend.load()
+            if backend._engine is None:
+                raise RuntimeError("pyttsx3 unavailable")
+            backend._engine.say(clean)  # noqa: SLF001
+            backend._engine.runAndWait()  # noqa: SLF001
+            return
+
+        # Piper path: synthesize in memory, then play.
+        t0 = time.perf_counter()
+        audio = backend.synthesize(clean)
+        t1 = time.perf_counter()
+        backend.play(audio)
+        t2 = time.perf_counter()
+        logger.debug(
+            f"[timing] TTS synth {(t1 - t0) * 1000:.0f}ms | "
+            f"play {(t2 - t1) * 1000:.0f}ms | "
+            f"{len(clean)} chars"
+        )
 
     # ── Worker thread ─────────────────────────────────────────
 
@@ -106,14 +235,15 @@ class TTSEngine:
                 continue
 
             try:
-                self._say(text)
+                self._speak_backend(text)
             except RuntimeError:
-                # The engine can die (e.g. audio driver hiccup). Rebuild it
+                # The engine can die (e.g. audio driver hiccup). Rebuild
                 # once; if that still fails, fall back to console-only.
                 logger.warning("TTS engine failed; reinitialising.")
-                self._engine = None
+                self._backend = self._make_backend()
+                self._backend.load()
                 try:
-                    self._say(text)
+                    self._speak_backend(text)
                 except Exception as exc:
                     logger.error(f"TTS unavailable after retry: {exc}")
             except Exception as exc:
@@ -164,13 +294,12 @@ class TTSEngine:
             except queue.Empty:
                 break
 
-        # engine.stop() purges the current utterance (SAPI5). It is called
-        # from THIS thread so it can interrupt a runAndWait() the worker is
-        # blocked inside. Safe to call before the engine exists.
-        engine = self._engine
-        if engine is not None:
+        # Interrupt active Piper playback immediately.
+        if self.engine_name != "pyttsx3":
             try:
-                engine.stop()
+                import sounddevice as sd
+
+                sd.stop()
             except Exception:
                 pass
 

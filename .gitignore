@@ -7,5 +7,8 @@ data/
 .ruff_cache/
 outputs/
 
+# Runtime logs
+jarvis.log
+
 # Secrets — never commit your .env file.
 .env

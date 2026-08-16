@@ -8,17 +8,18 @@ definitions and can never drift out of sync.
 import re
 from datetime import datetime
 
-# Phrases like "what time is it" / "tell me the time".
+# Phrases like "what time is it" / "tell me the time" / "time now".
 TIME_RE = re.compile(
     r"\b(what('?s| is)? the time|current time|tell me the time|"
-    r"time right now|what time is it)\b",
+    r"time right now|what time is it|what time now|time now)\b",
     re.IGNORECASE,
 )
 
 # Phrases like "what's the date" / "what day is it" / "today's date".
+# "today'?s? date" also catches Whisper's missing apostrophe variants.
 DATE_RE = re.compile(
-    r"\b(what('?s| is)? the date|current date|what day is it|"
-    r"today's date|tell me the date|what date is it)\b",
+    r"\b(what('?s| is)? the date|current date|what day is (it|today)|"
+    r"today'?s? date|tell me the date|what date is it|todays date)\b",
     re.IGNORECASE,
 )
 

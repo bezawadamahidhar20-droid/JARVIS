@@ -63,7 +63,10 @@ from jarvis_ui.animations.transitions import FadeLayer
 
 FPS = 60
 FRAME_MS = int(1000 / FPS)
-FONT_FAMILY = pick_font_family()
+# NOTE: resolved lazily inside main() — QFontDatabase needs a
+# QGuiApplication to exist, and importing this module happens before
+# QApplication is constructed.
+FONT_FAMILY = None
 
 
 class MainWindow(QMainWindow):
@@ -300,7 +303,7 @@ def main() -> int:
     app.setApplicationName("J.A.R.V.I.S")
     app.setStyle("Fusion")
 
-    font = QFont(FONT_FAMILY)
+    font = QFont(pick_font_family())
     font.setPointSize(10)
     app.setFont(font)
 

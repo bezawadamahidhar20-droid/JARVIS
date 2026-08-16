@@ -25,23 +25,30 @@ class ConversationMemory:
     so follow-up questions work correctly.
     """
 
-    def __init__(self, max_turns: int = 6, max_chars: int = 3000):
+    def __init__(self, max_turns: int | None = None, max_chars: int | None = None):
         """
         Args:
             max_turns: Max number of user+assistant pairs to keep.
                        Older turns dropped when limit exceeded.
+                       Defaults to the .env MEMORY_MAX_TURNS value.
             max_chars: Max total characters of history sent to the
                        model per request. Older turns dropped (in
                        pairs) when the total exceeds this.
+                       Defaults to the .env MEMORY_MAX_CHARS value.
         """
-        # Import here to avoid circular import issues
+        # Import here to avoid circular import issues. Explicit
+        # constructor arguments always win over .env defaults.
         try:
             from config import jarvis_config
-            self.max_turns = jarvis_config.MEMORY_MAX_TURNS
-            self.max_chars = jarvis_config.MEMORY_MAX_CHARS
+
+            cfg_turns = jarvis_config.MEMORY_MAX_TURNS
+            cfg_chars = jarvis_config.MEMORY_MAX_CHARS
         except Exception:
-            self.max_turns = max_turns
-            self.max_chars = max_chars
+            cfg_turns = 6
+            cfg_chars = 3000
+
+        self.max_turns = max_turns if max_turns is not None else cfg_turns
+        self.max_chars = max_chars if max_chars is not None else cfg_chars
 
         self._messages: List[Message] = []
         logger.info(

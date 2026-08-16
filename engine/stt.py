@@ -1,266 +1,189 @@
 """
-engine/stt.py — Speech-to-Text engine
+engine/stt.py — Speech-to-Text engine (Faster-Whisper, fully local)
 
-Captures audio with sounddevice and sends RAW PCM directly
-to Google's speech API using requests.
+Pipeline:
+    AdaptiveVAD captures one phrase (int16 @ 16 kHz)
+        -> converted to float32
+        -> transcribed by a locally-loaded Faster-Whisper model
 
-Why not use speech_recognition.recognize_google()?
-  It converts WAV -> FLAC by running a bundled flac.exe
-  subprocess. On Windows ARM64 / restricted systems that
-  binary fails with [WinError 50] The request is not supported.
-
-This implementation sends audio/l16 (raw 16-bit PCM) which
-Google accepts natively. No FLAC. No subprocess. No PyAudio.
+Design rules:
+  * The Whisper model is loaded ONCE (``load()``) and reused for every
+    utterance — never re-initialized per sentence.
+  * Nothing here needs the internet; transcription is 100% on-device.
+  * Empty / silent / too-short audio returns None instead of crashing.
+  * Any failure is logged and recovered from; the caller keeps looping.
 """
 
-import json
 import time
+
 import numpy as np
-import sounddevice as sd
-import requests
-from typing import Optional
+
+from engine.vad import AdaptiveVAD
 from utils.logger import get_logger
 
 logger = get_logger("stt")
 
-# ── Audio capture settings ────────────────────────────────────
-SAMPLE_RATE = 16000        # Google speech API expects 16 kHz
-CHANNELS = 1               # Mono
-DTYPE = "int16"            # 16-bit PCM
-SILENCE_THRESHOLD = 500    # RMS below this = silence
-SILENCE_DURATION = 0.7     # Seconds of silence ends the phrase
-CHUNK_DURATION = 0.05      # Audio chunk length in seconds
-MIN_SPEECH_CHUNKS = 3      # Ignore very short blips
-
-# ── Google speech endpoint (same one SpeechRecognition uses) ──
-GOOGLE_URL = (
-    "http://www.google.com/speech-api/v2/recognize"
-    "?client=chromium&lang={lang}&key={key}"
-)
-
 # ── Load config safely ────────────────────────────────────────
 try:
-    from config import stt_config
-    LANGUAGE = stt_config.LANGUAGE
-    TIMEOUT = stt_config.TIMEOUT
-    PHRASE_LIMIT = stt_config.PHRASE_LIMIT
-    SILENCE_DURATION = stt_config.SILENCE_DURATION
-    CHUNK_DURATION = stt_config.CHUNK_DURATION
-    GOOGLE_KEY = stt_config.GOOGLE_KEY
+    from config import stt_config, whisper_config
+
+    SAMPLE_RATE = stt_config.SAMPLE_RATE
+    WHISPER_MODEL = whisper_config.MODEL
+    WHISPER_COMPUTE_TYPE = whisper_config.COMPUTE_TYPE
+    WHISPER_DEVICE = whisper_config.DEVICE
+    WHISPER_LANGUAGE = whisper_config.LANGUAGE
+    WHISPER_BEAM_SIZE = whisper_config.BEAM_SIZE
 except Exception:
-    LANGUAGE = "en-US"
-    TIMEOUT = 5
-    PHRASE_LIMIT = 10
-    SILENCE_DURATION = 0.7
-    CHUNK_DURATION = 0.05
-    GOOGLE_KEY = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+    SAMPLE_RATE = 16000
+    WHISPER_MODEL = "base"
+    WHISPER_COMPUTE_TYPE = "int8"
+    WHISPER_DEVICE = "cpu"
+    WHISPER_LANGUAGE = "en"
+    WHISPER_BEAM_SIZE = 1
 
 
 class STTEngine:
     """
-    Speech-to-text using sounddevice capture and a direct
-    HTTP request to Google's speech API.
+    Speech-to-text using the VAD recorder + a local Faster-Whisper model.
     """
 
     def __init__(self, mic_manager=None):
-        # mic_manager kept for compatibility, not required
+        # mic_manager kept for compatibility; the VAD queries
+        # sounddevice directly.
         self.sample_rate = SAMPLE_RATE
-        self.channels = CHANNELS
-        self.dtype = DTYPE
-        self.language = LANGUAGE
-        self._test_microphone()
+        self.language = WHISPER_LANGUAGE
+        self.model = None
+        self.model_name = WHISPER_MODEL
+        self.compute_type = WHISPER_COMPUTE_TYPE
+        self.device = WHISPER_DEVICE
+        self.vad = AdaptiveVAD(sample_rate=SAMPLE_RATE)
+        self._loaded = False
 
-    def _test_microphone(self) -> None:
-        """Log which microphone will be used."""
+    # ── Model lifecycle ───────────────────────────────────────
+
+    def load(self) -> bool:
+        """
+        Load the Faster-Whisper model once at startup.
+
+        Returns True on success. Safe to call repeatedly (idempotent).
+        """
+        if self._loaded and self.model is not None:
+            return True
         try:
-            default_input = sd.default.device[0]
-            if default_input is None:
-                logger.warning("No default input device found.")
-                return
-            info = sd.query_devices(default_input)
+            t0 = time.perf_counter()
+            from faster_whisper import WhisperModel
+
             logger.info(
-                f"Microphone: {info.get('name', 'Unknown')}"
+                f"Loading Faster-Whisper model '{self.model_name}' "
+                f"({self.device}/{self.compute_type})..."
+            )
+            self.model = WhisperModel(
+                self.model_name,
+                device=self.device,
+                compute_type=self.compute_type,
+            )
+            self._loaded = True
+            logger.info(
+                f"Whisper model ready in {time.perf_counter() - t0:.1f}s"
+            )
+            return True
+        except ImportError:
+            logger.error(
+                "faster-whisper is not installed. Run: "
+                "pip install faster-whisper"
             )
         except Exception as e:
-            logger.error(f"Microphone check failed: {e}")
+            logger.error(
+                f"Failed to load Whisper model '{self.model_name}': {e}. "
+                f"Run: pip install faster-whisper and ensure the model "
+                f"is downloadable (WHISPER_MODEL={self.model_name})."
+            )
+        self.model = None
+        return False
+
+    def unload(self) -> None:
+        """Release the model (used during shutdown)."""
+        self.model = None
+        self._loaded = False
 
     # ── Public API ────────────────────────────────────────────
 
-    def listen(self) -> Optional[str]:
+    def listen(self) -> str | None:
         """
         Record one phrase from the microphone and transcribe it.
 
         Returns:
             str  : recognized text (lowercase)
-            None : nothing heard, or recognition failed
+            None : nothing heard, or recognition/transcription failed
         """
         t0 = time.perf_counter()
-        audio = self._record_phrase()
+        audio = self.vad.record_phrase()
         if audio is None:
+            logger.debug("No speech captured.")
             return None
 
         t1 = time.perf_counter()
-        pcm_bytes = audio.tobytes()
-        text = self._recognize(pcm_bytes)
+        text = self.transcribe(audio)
         t2 = time.perf_counter()
 
-        logger.info(
+        logger.debug(
             f"[timing] record {(t1 - t0) * 1000:.0f}ms | "
-            f"recognize {(t2 - t1) * 1000:.0f}ms"
+            f"transcribe {(t2 - t1) * 1000:.0f}ms"
         )
 
         if text:
             logger.info(f"Recognized: '{text}'")
             print(f"[You said: {text}]")
         else:
+            # Silence is not an error — just keep listening. The VAD
+            # already printed "[Listening... speak now]".
             logger.debug("No transcription returned.")
+            print("[No speech detected — listening...]")
 
         return text
 
-    # ── Audio capture ─────────────────────────────────────────
-
-    def _record_phrase(self) -> Optional[np.ndarray]:
+    def transcribe(self, audio: np.ndarray) -> str | None:
         """
-        Record until the user stops speaking.
+        Transcribe int16 audio with the loaded Whisper model.
 
-        Returns numpy int16 array, or None on timeout/error.
+        Returns lowercase text, or None on empty input / failure.
         """
-        try:
-            print("\n[Listening... speak now]")
-
-            chunk_duration = CHUNK_DURATION
-            chunk_size = int(self.sample_rate * chunk_duration)
-            max_silence = int(SILENCE_DURATION / chunk_duration)
-            max_total = int(PHRASE_LIMIT / chunk_duration)
-            max_wait = int(TIMEOUT / chunk_duration)
-
-            chunks = []
-            silence_count = 0
-            wait_count = 0
-            speaking = False
-
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype=self.dtype,
-                blocksize=chunk_size
-            ) as stream:
-
-                while True:
-                    raw, _ = stream.read(chunk_size)
-
-                    # Convert cffi buffer -> numpy (Py 3.14 safe)
-                    chunk = np.frombuffer(
-                        bytes(raw), dtype=np.int16
-                    )
-
-                    rms = self._rms(chunk)
-
-                    if not speaking:
-                        wait_count += 1
-                        if wait_count > max_wait:
-                            return None      # nobody spoke
-                        if rms > SILENCE_THRESHOLD:
-                            speaking = True
-                            chunks.append(chunk)
-                            print("[Speech detected...]")
-                    else:
-                        chunks.append(chunk)
-                        if rms < SILENCE_THRESHOLD:
-                            silence_count += 1
-                        else:
-                            silence_count = 0
-
-                        if silence_count >= max_silence:
-                            break
-                        if len(chunks) >= max_total:
-                            break
-
-            if len(chunks) < MIN_SPEECH_CHUNKS:
-                logger.debug("Speech too short, ignoring.")
-                return None
-
-            print("[Processing...]")
-            return np.concatenate(chunks, axis=0)
-
-        except sd.PortAudioError as e:
-            logger.error(f"PortAudio error: {e}")
+        if audio is None or audio.size == 0:
+            logger.debug("Empty audio — nothing to transcribe.")
             return None
-        except Exception as e:
-            logger.error(f"Recording error: {e}")
+        if self.model is None:
+            logger.error("Whisper model not loaded; call load() first.")
             return None
-
-    def _rms(self, chunk: np.ndarray) -> float:
-        """Volume level of an audio chunk."""
-        if chunk.size == 0:
-            return 0.0
-        return float(
-            np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
-        )
-
-    # ── Recognition ───────────────────────────────────────────
-
-    def _recognize(self, pcm_bytes: bytes) -> Optional[str]:
-        """
-        Send raw 16-bit PCM to Google and parse the response.
-
-        Google returns several newline-separated JSON objects.
-        Only one of them contains the transcript.
-        """
-        url = GOOGLE_URL.format(
-            lang=self.language, key=GOOGLE_KEY
-        )
-        headers = {
-            "Content-Type": f"audio/l16; rate={self.sample_rate}"
-        }
 
         try:
-            resp = requests.post(
-                url,
-                data=pcm_bytes,
-                headers=headers,
-                timeout=15
+            # Whisper expects float32 mono in [-1, 1].
+            samples = audio.astype(np.float32) / 32768.0
+            segments, _info = self.model.transcribe(
+                samples,
+                language=self.language,
+                beam_size=WHISPER_BEAM_SIZE,
+                condition_on_previous_text=False,
+                vad_filter=False,
             )
-
-            if resp.status_code != 200:
-                logger.error(
-                    f"Google STT HTTP {resp.status_code}"
-                )
+            text = " ".join(
+                seg.text.strip() for seg in segments if seg.text
+            ).strip()
+            if not text:
                 return None
-
-            # Parse newline-delimited JSON
-            for line in resp.text.strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                results = data.get("result", [])
-                if not results:
-                    continue
-
-                alternatives = results[0].get("alternative", [])
-                if not alternatives:
-                    continue
-
-                transcript = alternatives[0].get("transcript", "")
-                if transcript.strip():
-                    return transcript.strip().lower()
-
-            logger.debug("Google returned no transcript.")
-            return None
-
-        except requests.Timeout:
-            logger.error("Google STT request timed out.")
-            return None
-        except requests.ConnectionError:
-            logger.error(
-                "No internet connection for speech recognition."
-            )
-            return None
+            return text.lower()
         except Exception as e:
-            logger.error(f"Recognition error: {e}")
+            logger.error(f"Transcription failed: {e}")
             return None
+
+    # ── Diagnostics ───────────────────────────────────────────
+
+    def describe(self) -> str:
+        """Short human-readable status for `jarvis --doctor`."""
+        if self._loaded and self.model is not None:
+            return (
+                f"OK ({self.model_name}, "
+                f"{self.device}/{self.compute_type})"
+            )
+        return (
+            f"NOT LOADED ({self.model_name})"
+        )
