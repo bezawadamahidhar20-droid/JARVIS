@@ -147,7 +147,7 @@ FAST_RESPONSES: dict = {
 # Ordinary sentences are never altered, and the raw transcription is
 # kept in the debug log.
 _WAKE_VARIANTS_RE = re.compile(
-    r"\b(jervis|lajav|lajad|jarivs|jerivs|jarvis)\b",
+    r"\b(jervis|lajav|lajad|jarivs|jerivs)\b",
     re.IGNORECASE,
 )
 _PAUSE_WORDS = (

@@ -133,14 +133,14 @@ class OllamaClient(LLMProvider):
         num_gpu: int = None,
         think: bool = None
     ):
-        self.base_url    = base_url      or OLLAMA_BASE_URL
-        self.model       = model         or _resolve_default_model()
-        self.timeout     = timeout       or OLLAMA_TIMEOUT
+        self.base_url    = base_url      if base_url is not None else OLLAMA_BASE_URL
+        self.model       = model         if model is not None else _resolve_default_model()
+        self.timeout     = timeout       if timeout is not None else OLLAMA_TIMEOUT
         self.temperature = temperature   if temperature is not None else OLLAMA_TEMP
         self.stream      = stream        if stream is not None else OLLAMA_STREAM
         self.num_predict = num_predict   if num_predict is not None else OLLAMA_NUM_PREDICT
         self.num_ctx     = num_ctx       if num_ctx is not None else OLLAMA_NUM_CTX
-        self.keep_alive  = keep_alive    or OLLAMA_KEEP_ALIVE
+        self.keep_alive  = keep_alive    if keep_alive is not None else OLLAMA_KEEP_ALIVE
         self.num_gpu     = num_gpu       if num_gpu is not None else OLLAMA_NUM_GPU
         self.think       = think         if think is not None else OLLAMA_THINK
         # Circuit breaker: after CIRCUIT_THRESHOLD consecutive failures

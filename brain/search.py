@@ -485,7 +485,7 @@ _SPAM_DOMAINS = (
     "quora.com", "reddit.com", "facebook.com", "instagram.com",
     "tiktok.com", "pinterest.com", "x.com", "twitter.com",
     "medium.com", "substack.com", "buzzfeed.com",
-    "wattpad.com", "answers.com", "yahoo.answers",
+    "wattpad.com", "answers.com", "answers.yahoo.com",
     "jagran.com",  # heavy SEO aggregation
 )
 
