@@ -2,7 +2,9 @@
 
 <br/>
 
-# J.A.R.V.I.S.
+<img src="docs/hero-core.svg" alt="JARVIS — AI Core" width="100%"/>
+
+<br/>
 
 **A private, local AI voice assistant for Windows.**
 
@@ -50,6 +52,10 @@ jarvis
 
 ## 🧬 Architecture
 
+<img src="docs/architecture-animated.svg" alt="JARVIS Pipeline" width="90%"/>
+
+The same pipeline, GitHub-native Mermaid:
+
 ```mermaid
 flowchart LR
     A["🎤 Microphone<br/>sounddevice"] --> B["Adaptive VAD<br/>noise calibration + silence cut-off"]
@@ -88,6 +94,8 @@ flowchart LR
 ---
 
 ## 🎙️ How JARVIS Hears You
+
+<img src="docs/voice-pipeline.svg" alt="Voice Pipeline" width="85%"/>
 
 ### Adaptive voice activity detection (`engine/vad.py`)
 
