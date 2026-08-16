@@ -240,7 +240,6 @@ class GroqConfig:
 
 class JARVISConfig:
     NAME: str = _env_str("JARVIS_NAME", "JARVIS")
-    WAKE_WORD: str = _env_str("JARVIS_WAKE_WORD", "jarvis")
     OWNER: str = _env_str("JARVIS_OWNER", "Sir")
 
     # Which AI provider to use ("ollama" primary, "groq" optional fallback).

@@ -522,15 +522,36 @@ class JARVIS:
                 except (TypeError, ValueError):
                     pass
 
-        parts: list[str] = []
-        async for sentence in stream_sentences_async(
-            self.provider, user_input, self.memory, **kwargs
-        ):
-            parts.append(sentence)
-            if sentence:
-                self.speak(sentence)
-        full = " ".join(p for p in parts if p).strip()
-        return full or None
+        # Hard cap on the WHOLE stream. requests-level timeouts bound
+        # individual stalls, but a provider that stops producing
+        # sentences without erroring (or hangs inside the sync bridge
+        # thread) must never leave JARVIS waiting forever. Generous:
+        # provider timeout + 60s slack for slow-CPU generation.
+        provider_timeout = getattr(self.provider, "timeout", None) or 120
+        stream_deadline = float(provider_timeout) + 60.0
+
+        async def _consume() -> str | None:
+            parts: list[str] = []
+            async for sentence in stream_sentences_async(
+                self.provider, user_input, self.memory, **kwargs
+            ):
+                parts.append(sentence)
+                if sentence:
+                    self.speak(sentence)
+            full = " ".join(p for p in parts if p).strip()
+            return full or None
+
+        try:
+            # On timeout, wait_for cancels _consume(), which aclose()s
+            # the underlying stream — Ollama aborts the HTTP request
+            # cleanly instead of leaking a worker thread.
+            return await asyncio.wait_for(_consume(), timeout=stream_deadline)
+        except asyncio.TimeoutError:
+            logger.error(
+                f"AI stream exceeded the {stream_deadline:.0f}s hard "
+                "timeout; aborting response."
+            )
+            return None
 
     # ── Web search (current information) ──────────────────────
 

@@ -10,21 +10,22 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 # Mirrors requirements.txt (pinned). numpy is a range because a single
-# version cannot span Python 3.10 (2.2.x) through 3.14 (2.5.x).
+# version cannot span the supported Python range (1.26.x covers 3.10-3.12;
+# 2.2.x supports 3.10; 2.5.x supports 3.12-3.14).
 dependencies = [
-    "faster-whisper==1.2.1",
-    "piper-tts==1.6.1",
-    "sounddevice==0.5.5",
-    "numpy>=2.2,<2.6",
-    "requests==2.34.2",
-    "python-dotenv==1.2.2",
+    "faster-whisper==1.1.0",
+    "piper-tts==1.2.0",
+    "sounddevice==0.5.0",
+    "numpy>=1.26.0,<2.0.0",
+    "requests==2.32.3",
+    "python-dotenv==1.0.1",
     "pyautogui==0.9.54",
-    "pillow==12.3.0",
-    "pycaw==20251023",
-    "comtypes==1.4.16",
-    "rich==15.0.0",
-    "SpeechRecognition==3.17.0",
-    "pyttsx3==2.99",
+    "pillow==10.4.0",
+    "pycaw==20240210",
+    "comtypes==1.4.14",
+    "rich==13.7.1",
+    "SpeechRecognition==3.10.4",
+    "pyttsx3==2.90",
 ]
 
 [project.optional-dependencies]
