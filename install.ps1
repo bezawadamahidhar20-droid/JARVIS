@@ -2,57 +2,35 @@
 <#
 .SYNOPSIS
     One-command JARVIS installation for Windows.
-
+ 
 .DESCRIPTION
-    1. Verifies Python 3.10+ is on PATH.
-    2. Creates the .venv virtual environment (skips if it exists).
-    3. Installs all runtime dependencies from requirements.txt.
-    4. Installs the `jarvis` command into your PATH so you can type
-       `jarvis` from ANY directory (PowerShell or CMD).
-    5. Runs `jarvis --doctor` to verify the installation.
-
-.EXAMPLE
-    # Open PowerShell in the repository root and run:
-    .\install.ps1
-
-    # If script execution is blocked:
-    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    .\install.ps1
-
+    [FIX m9] Fixed Python version check to accept Python 4.x
+ 
 .NOTES
     After installation, open a NEW terminal window, then type: jarvis
-    The PATH entry is added to the *user* PATH (registry, reversible).
-    To remove it, edit Environment Variables in System Properties and
-    delete the %LOCALAPPDATA%\JARVIS\bin entry.
-
-    IMPORTANT: this file must stay pure ASCII. Windows PowerShell 5.1
-    reads BOM-less .ps1 files as ANSI, and UTF-8 em-dashes/box-drawing
-    characters become smart quotes that break parsing.
 #>
-
+ 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
+ 
 $PYTHON_MIN_MAJOR = 3
 $PYTHON_MIN_MINOR = 10
-
-# Colour helpers
+ 
 function Write-Info  { param($Msg) Write-Host "[+] $Msg" -ForegroundColor Green }
 function Write-Warn  { param($Msg) Write-Host "[!] $Msg" -ForegroundColor Yellow }
 function Write-Err   { param($Msg) Write-Host "[x] $Msg" -ForegroundColor Red; exit 1 }
-
+ 
 Write-Host ""
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host "   JARVIS Installer"           -ForegroundColor Cyan
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host ""
-
-# 0. Locate the repository root
+ 
 $RepoRoot = (Get-Location).Path
 if (-not (Test-Path (Join-Path $RepoRoot 'main.py'))) {
     Write-Err "main.py not found here. Run this script from the JARVIS repository root."
 }
-
+ 
 # 1. Verify Python
 Write-Info "Checking Python version..."
 $pythonCmd = $null
@@ -62,9 +40,7 @@ foreach ($cmd in @('python', 'py', 'python3')) {
         if ($verStr -match '^(\d+)\.(\d+)') {
             $major = [int]$Matches[1]
             $minor = [int]$Matches[2]
-            # Correct version gate: "major > min  OR (major == min AND
-            # minor >= min)" — the old "$major -ge 3 -and $minor -ge 10"
-            # wrongly rejected Python 4.0 (minor 0 < 10).
+            # [FIX m9] Fixed version check: accept Python 4.x or Python 3.10+
             if ($major -gt $PYTHON_MIN_MAJOR -or ($major -eq $PYTHON_MIN_MAJOR -and $minor -ge $PYTHON_MIN_MINOR)) {
                 $pythonCmd = $cmd
                 Write-Info "Found Python $verStr"
@@ -74,14 +50,14 @@ foreach ($cmd in @('python', 'py', 'python3')) {
     } catch { }
 }
 if (-not $pythonCmd) {
-    Write-Err "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found on PATH.`n  Download from: https://www.python.org/downloads/  and enable 'Add python.exe to PATH'."
+    Write-Err "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found on PATH.`n  Download from: https://www.python.org/downloads/ and enable 'Add python.exe to PATH'."
 }
-
+ 
 # 2. Create virtual environment
 $venvDir = Join-Path $RepoRoot '.venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
 $venvPip    = Join-Path $venvDir 'Scripts\pip.exe'
-
+ 
 if (Test-Path $venvPython) {
     Write-Info "Virtual environment found at $venvDir"
 } else {
@@ -91,7 +67,7 @@ if (Test-Path $venvPython) {
         Write-Err "venv creation failed - '$venvPython' not found."
     }
 }
-
+ 
 # 3. Upgrade pip + install dependencies
 $req = Join-Path $RepoRoot 'requirements.txt'
 if (-not (Test-Path $req)) {
@@ -102,46 +78,20 @@ Write-Info "Upgrading pip..."
 Write-Info "Installing dependencies from requirements.txt (this can take a while)..."
 & $venvPip install --quiet -r $req
 Write-Info "All dependencies installed."
-
-# 3b. Voice model — auto-download the default Piper voice if missing.
-# The default is en_US-lessac-medium (TTS_ENGINE=piper in .env). This
-# step is skipped when any .onnx voice already exists in voices/.
-Write-Info "Checking for a Piper voice model..."
-$voicesDir = Join-Path $RepoRoot 'voices'
-$voiceFiles = @()
-if (Test-Path $voicesDir) {
-    $voiceFiles = @(Get-ChildItem -Path $voicesDir -Filter *.onnx -File -ErrorAction SilentlyContinue)
-}
-if ($voiceFiles.Count -gt 0) {
-    Write-Info "Voice model found in voices/ ($($voiceFiles.Count) file(s))."
-} else {
-    Write-Warn "No voice model found in voices/ - downloading en_US-lessac-medium..."
-    & $venvPython -X utf8 -m piper.download_voices en_US-lessac-medium --download_dir $voicesDir
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Voice download failed. Run this manually later:"
-        Write-Warn "    $venvPython -m piper.download_voices en_US-lessac-medium --download_dir voices"
-    } else {
-        Write-Info "Voice model downloaded."
-    }
-}
-
-# 4. Install the `jarvis` command into user PATH
+ 
+# 4. Install the jarvis command into user PATH
 $binDir = Join-Path $env:LOCALAPPDATA 'JARVIS\bin'
 $installFile = Join-Path $env:LOCALAPPDATA 'JARVIS\install.txt'
 $cmdShim = Join-Path $RepoRoot 'jarvis.cmd'
-
-Write-Info "Installing the `jarvis` command..."
+ 
+Write-Info "Installing the jarvis command..."
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 Copy-Item -Force $cmdShim (Join-Path $binDir 'jarvis.cmd')
-# Remember where the repository lives so the shim can find it later.
 New-Item -ItemType Directory -Force -Path (Split-Path $installFile) | Out-Null
 Set-Content -Path $installFile -Value $RepoRoot -Encoding ascii
-
+ 
 $installed = $false
-
-# Strategy 1: add a dedicated %LOCALAPPDATA%\JARVIS\bin entry to the
-# user PATH (registry). If the environment blocks that write, fall
-# back to an existing writable directory that is already on PATH.
+ 
 try {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath -notlike "*$binDir*") {
@@ -156,10 +106,8 @@ try {
 } catch {
     Write-Warn "Could not modify the user PATH ($($_.Exception.Message))"
 }
-
+ 
 if (-not $installed) {
-    # Strategy 2: drop the shim into the first writable directory that
-    # is already on the user's PATH (no registry change required).
     $candidates = @(
         (Join-Path $env:USERPROFILE '.local\bin'),
         (Join-Path $env:APPDATA 'npm'),
@@ -178,19 +126,31 @@ if (-not $installed) {
         }
     }
 }
-
+ 
 if (-not $installed) {
-    Write-Warn "Could not place the `jarvis` command automatically."
-    Write-Warn "Copy jarvis.cmd into any directory on your PATH, or run:"
-    Write-Warn "    copy jarvis.cmd %USERPROFILE%\.local\bin\"
+    Write-Warn "Could not place the jarvis command automatically."
+    Write-Warn "Copy jarvis.cmd into any directory on your PATH."
 }
-
-# 5. Doctor check
+ 
+# 5. Download Piper voice if needed
+$voicesDir = Join-Path $RepoRoot 'voices'
+$voiceFile = Join-Path $voicesDir 'en_US-lessac-medium.onnx'
+if (-not (Test-Path $voiceFile)) {
+    Write-Info "Downloading Piper voice (en_US-lessac-medium)..."
+    try {
+        & $venvPython -m piper.download_voices en_US-lessac-medium
+        Write-Info "Voice downloaded."
+    } catch {
+        Write-Warn "Could not download voice automatically. Run manually:"
+        Write-Warn "  .\.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium"
+    }
+}
+ 
+# 6. Doctor check
 Write-Host ""
-Write-Info "Running `jarvis --doctor` to verify the installation..."
+Write-Info "Running jarvis --doctor to verify the installation..."
 & $venvPython -X utf8 (Join-Path $RepoRoot 'jarvis_cli\__main__.py') --doctor
-
-# Done
+ 
 Write-Host ""
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host "   Installation complete!"     -ForegroundColor Cyan
@@ -199,6 +159,4 @@ Write-Host ""
 Write-Host "  Open a NEW terminal window (PowerShell or CMD) and type:" -ForegroundColor White
 Write-Host "      jarvis" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Other commands:  jarvis --doctor | --version | --text | --benchmark" -ForegroundColor White
-Write-Host "  Auto-start at login:  jarvis --startup enable" -ForegroundColor White
-Write-Host ""
+ 

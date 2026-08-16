@@ -250,6 +250,10 @@ class OllamaClient(LLMProvider):
         """True when the circuit breaker is fast-failing requests."""
         return self._breaker.is_open
 
+    def is_configured(self) -> bool:
+        """Ollama is configured whenever a base URL is set (local default)."""
+        return bool(self.base_url)
+
     def is_available(self) -> bool:
         """Quick ping to check if Ollama is reachable.
 

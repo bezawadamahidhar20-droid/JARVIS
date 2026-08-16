@@ -53,7 +53,7 @@ def test_validate_accepts_unicode():
 def test_router_accepts_normal_command():
     router = IntentRouter()
     intent, _ = router.route("open chrome")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION
 
 
 def test_router_rejects_overlong_input():
@@ -78,7 +78,7 @@ def test_router_rejects_empty():
 def test_router_never_crashes_on_control_chars():
     router = IntentRouter()
     intent, _ = router.route("\x00\x01\x02 open chrome \x7f")
-    assert intent in (Intent.COMMAND, Intent.UNKNOWN)
+    assert intent in (Intent.AI_QUESTION, Intent.UNKNOWN)
 
 
 # ── Full pipeline (process_input) ─────────────────────────────
@@ -135,11 +135,11 @@ class FakeProvider:
     def is_available(self):
         return True
 
-    def ask(self, user_input, memory=None):
+    def ask(self, user_input, memory=None, context=None):
         self.asked.append(user_input)
         return self.reply
 
-    def ask_stream(self, user_input, memory=None, on_sentence=None):
+    def ask_stream(self, user_input, memory=None, on_sentence=None, context=None):
         self.asked.append(user_input)
         if on_sentence:
             on_sentence(self.reply)
@@ -166,13 +166,13 @@ def make_jarvis():
 
 def test_pipeline_normal_command_works():
     jarvis = make_jarvis()
-    assert jarvis.process_input("open chrome") is True
+    assert jarvis.process_input("open chrome")
     assert jarvis.tts.spoken  # a spoken response, not a crash
 
 
 def test_pipeline_overlong_input_rejected_safely():
     jarvis = make_jarvis()
-    assert jarvis.process_input("hello " + "x" * MAX_INPUT_CHARS) is True
+    assert jarvis.process_input("hello " + "x" * MAX_INPUT_CHARS)
     # The polite rejection was spoken; nothing was routed to the AI.
     assert any("too long" in s.lower() for s in jarvis.tts.spoken)
     assert jarvis.provider.asked == []
@@ -180,7 +180,7 @@ def test_pipeline_overlong_input_rejected_safely():
 
 def test_pipeline_empty_and_whitespace_ignored():
     jarvis = make_jarvis()
-    assert jarvis.process_input("") is True
-    assert jarvis.process_input("   ") is True
-    assert jarvis.process_input("\t\n") is True
+    assert jarvis.process_input("") is None
+    assert jarvis.process_input("   ") is None
+    assert jarvis.process_input("\t\n") is None
     assert jarvis.provider.asked == []

@@ -13,6 +13,8 @@ Rules:
   * Punctuation-only leftovers ("...") are never emitted as speech.
   * A line with no sentence-ending punctuation is emitted whole, so
     newline-formatted replies never stall TTS.
+
+[FIX m5] Added __all__ exports.
 """
 
 import re
@@ -32,6 +34,11 @@ _ABBREVIATIONS = frozenset({
     "capt", "gov", "gen", "col", "lt", "sgt", "al", "inc", "ltd",
     "co", "corp", "u.s", "u.k", "a.m", "p.m",
 })
+
+__all__ = [
+    "clean_response",
+    "split_into_sentences",
+]
 
 
 def _is_abbreviation(word: str) -> bool:
@@ -53,7 +60,7 @@ def _split_punctuation(text: str) -> tuple[list[str], str]:
     with no sentence-ending punctuation yet (it may still grow).
 
     ``pos`` is the scan position (it advances past abbreviation
-    periods too) while ``emitted_upto`` only advances when a real
+    periods too) while ``segment_start`` only advances when a real
     sentence is emitted — so abbreviation text is never lost from the
     remainder.
     """
@@ -109,12 +116,18 @@ def split_into_sentences(buffer: str) -> tuple[list[str], str]:
 
 
 def clean_response(text: str) -> str:
-    """
-    Strip markdown / markup artifacts that sound bad when spoken aloud.
-    """
-    text = re.sub(r"<[^>]+>", "", text)      # XML-style tags
-    text = re.sub(r"\*+", "", text)          # bold / italic markers
-    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)  # headers
-    text = re.sub(r"`+", "", text)           # inline code markers
-    text = re.sub(r"\n{3,}", "\n\n", text)   # collapse blank runs
+    """Clean up LLM response text."""
+    if not text:
+        return ""
+
+    # Remove markdown artifacts
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)  # Bold
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)  # Italic
+    text = re.sub(r"`([^`]+)`", r"\1", text)  # Code
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)  # Headers
+    text = re.sub(r"^[-*]\s+", "", text, flags=re.MULTILINE)  # Lists
+
+    # Collapse whitespace
+    text = " ".join(text.split())
+
     return text.strip()

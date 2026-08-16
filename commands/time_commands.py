@@ -1,37 +1,66 @@
-"""Clock and calendar commands (pure functions, no side effects).
-
-The compiled regexes live here — not in the router — so that
-``brain.router`` and ``commands.registry`` both reuse the exact same
-definitions and can never drift out of sync.
 """
-
+commands/time_commands.py — Time and date commands.
+ 
+[FIX m5] Added __all__ exports.
+"""
+ 
 import re
 from datetime import datetime
-
-# Phrases like "what time is it" / "tell me the time" / "time now".
+ 
+__all__ = [
+    "TIME_RE",
+    "DATE_RE",
+    "get_time",
+    "get_date",
+]
+ 
 TIME_RE = re.compile(
-    r"\b(what('?s| is)? the time|current time|tell me the time|"
-    r"time right now|what time is it|what time now|time now)\b",
+    r"\b(what time is it|what's the time|current time|"
+    r"tell me the time|time please)\b",
     re.IGNORECASE,
 )
-
-# Phrases like "what's the date" / "what day is it" / "today's date".
-# "today'?s? date" also catches Whisper's missing apostrophe variants.
+ 
 DATE_RE = re.compile(
-    r"\b(what('?s| is)? the date|current date|what day is (it|today)|"
-    r"today'?s? date|tell me the date|what date is it|todays date)\b",
+    r"\b(what date is it|what's the date|today's date|"
+    r"current date|what day is it|tell me the date)\b",
     re.IGNORECASE,
 )
-
-
-def get_current_time() -> str:
-    """Return the current time, e.g. "It's 3:45 PM"."""
+ 
+ 
+def get_time() -> str:
+    """Return the current time as a spoken string."""
     now = datetime.now()
-    formatted = now.strftime("%I:%M %p").lstrip("0")
-    return f"It's {formatted}."
-
-
-def get_current_date() -> str:
-    """Return today's date, e.g. "Today is Monday, July 14, 2025"."""
+    hour = now.hour
+    minute = now.minute
+    
+    # 12-hour format
+    period = "AM" if hour < 12 else "PM"
+    hour_12 = hour % 12
+    if hour_12 == 0:
+        hour_12 = 12
+    
+    if minute == 0:
+        return f"It's {hour_12} o'clock {period}."
+    elif minute == 30:
+        return f"It's half past {hour_12} {period}."
+    elif minute == 15:
+        return f"It's quarter past {hour_12} {period}."
+    elif minute == 45:
+        return f"It's quarter to {(hour_12 % 12) + 1} {period}."
+    else:
+        return f"It's {hour_12}:{minute:02d} {period}."
+ 
+ 
+def get_date() -> str:
+    """Return the current date as a spoken string."""
     now = datetime.now()
-    return f"Today is {now:%A, %B} {now.day}, {now.year}."
+    
+    # Day suffix
+    day = now.day
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    
+    return now.strftime(f"Today is %A, %B {day}{suffix}, %Y.")
+ 

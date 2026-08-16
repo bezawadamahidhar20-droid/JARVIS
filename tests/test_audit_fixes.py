@@ -108,7 +108,8 @@ def _pending(**kw):
 def test_confirmation_has_random_nonce():
     a = _pending()
     b = _pending()
-    assert a.token and len(a.token) >= 6
+    assert a.token and len(a.token) == 4
+    assert a.token.isdigit()
     assert a.token != b.token  # every confirmation gets a fresh nonce
 
 
@@ -143,7 +144,7 @@ def test_confirmation_prompt_includes_token_when_required():
 def test_confirmation_token_cannot_reauthorize_after_take():
     p = _pending(require_token=True)
     assert p.confirm("yes", p.token) is True
-    assert p.take() is not None
+    assert p.take("yes", p.token) is not None
     assert p.confirm("yes", p.token) is False  # consumed
 
 
@@ -230,22 +231,22 @@ def test_main_token_confirmation_flow(monkeypatch):
     )
 
     # Request the shutdown -> confirmation pending with token required.
-    assert jarvis.process_input("shut down my computer") is True
+    assert jarvis.process_input("shut down my computer")
     assert jarvis._pending is not None and jarvis._pending.require_token
     token = jarvis._pending.token
     assert runs == []
 
     # Plain "yes" without the code: NOT authorized, pending dropped.
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert runs == []
     assert jarvis._pending is None
 
     # Re-request and echo the NEW code -> executes exactly once. (Each
     # confirmation gets a fresh nonce, so the old token is now invalid.)
-    assert jarvis.process_input("shut down my computer") is True
+    assert jarvis.process_input("shut down my computer")
     fresh_token = jarvis._pending.token
     assert fresh_token != token  # nonce rotates per confirmation
-    assert jarvis.process_input(fresh_token) is True
+    assert jarvis.process_input(fresh_token)
     assert runs and runs[0][0] == "shutdown"
     assert jarvis._pending is None
 

@@ -1,6 +1,6 @@
 """Intent router tests — deterministic classification."""
 
-from brain.router import IntentRouter, Intent, parse_model_mode_request
+from brain.router import IntentRouter, Intent, parse_model_mode
 
 
 def test_exit_phrases():
@@ -28,14 +28,17 @@ def test_fast_responses():
         assert reply
 
 
-def test_commands():
+def test_command_phrases_stay_ai_question():
+    """The router no longer emits a COMMAND intent — commands are
+    resolved by the command registry after routing (main.py falls back
+    to the registry for any AI_QUESTION)."""
     router = IntentRouter()
     for phrase in ("what time is it", "what's the date",
                    "open chrome", "open notepad", "open calculator",
                    "open youtube", "take a screenshot",
                    "tell me the time", "what day is it today"):
         intent, _ = router.route(phrase)
-        assert intent == Intent.COMMAND, f"expected COMMAND for {phrase!r}"
+        assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
 
 
 def test_unknown_goes_to_ai():
@@ -56,13 +59,14 @@ def test_empty_input_unknown():
 def test_case_insensitive():
     router = IntentRouter()
     intent, _ = router.route("WHAT TIME IS IT")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION
     intent, _ = router.route("Open Chrome")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION
 
 
-def test_time_date_variants_are_commands_not_ai():
-    """Time/date questions must never reach the LLM or web search."""
+def test_time_date_variants_are_not_tools():
+    """Time/date questions are plain AI_QUESTION routes (the command
+    registry handles them downstream), never the LLM classifier."""
     router = IntentRouter()
     for phrase in (
         "what is today date",      # Whisper drops the apostrophe
@@ -73,10 +77,12 @@ def test_time_date_variants_are_commands_not_ai():
         "what is the current time",
     ):
         intent, _ = router.route(phrase)
-        assert intent == Intent.COMMAND, f"expected COMMAND for {phrase!r}"
+        assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
 
 
-def test_web_search_intent():
+def test_web_search_questions_route_to_ai():
+    """Current-information questions route as AI_QUESTION; the
+    classifier in main() decides whether to consult the web."""
     router = IntentRouter()
     for phrase in (
         "who is the current chief minister of andhra pradesh",
@@ -85,7 +91,7 @@ def test_web_search_intent():
         "what is today's weather",
     ):
         intent, _ = router.route(phrase)
-        assert intent == Intent.WEB_SEARCH, f"expected WEB_SEARCH for {phrase!r}"
+        assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
 
 
 def test_stop_speaking_intent():
@@ -100,15 +106,14 @@ def test_stop_speaking_intent():
 def test_model_mode_switch_phrases():
     router = IntentRouter()
     for phrase, expected in (
-        ("switch to fast mode", "fast"),
-        ("use the fast model", "fast"),
-        ("use the fast one", "fast"),
-        ("go fast mode", "fast"),
-        ("switch to quality mode", "quality"),
-        ("use the quality model", "quality"),
-        ("change to quality mode", "quality"),
-        ("set the model to fast", "fast"),
-        ("go into fast mode", "fast"),
+        ("switch to fast mode", ("switch", "fast")),
+        ("use the fast model", ("switch", "fast")),
+        ("use the fast one", ("switch", "fast")),
+        ("go fast mode", ("switch", "fast")),
+        ("switch to quality mode", ("switch", "quality")),
+        ("use the quality model", ("switch", "quality")),
+        ("change to quality mode", ("switch", "quality")),
+        ("go into fast mode", ("switch", "fast")),
     ):
         intent, cleaned = router.route(phrase)
         assert intent == Intent.MODEL_MODE, f"expected MODEL_MODE for {phrase!r}"
@@ -126,7 +131,7 @@ def test_model_mode_status_phrases():
     ):
         intent, cleaned = router.route(phrase)
         assert intent == Intent.MODEL_MODE, f"expected MODEL_MODE for {phrase!r}"
-        assert cleaned == "status"
+        assert cleaned == ("status", "")
 
 
 def test_non_model_mode_phrases_stay_ai():
@@ -143,10 +148,9 @@ def test_non_model_mode_phrases_stay_ai():
         assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
 
 
-def test_parse_model_mode_request():
-    assert parse_model_mode_request("switch to fast mode") == "fast"
-    assert parse_model_mode_request("use the quality model") == "quality"
-    assert parse_model_mode_request("which model are you using") == "status"
-    assert parse_model_mode_request("what is python") is None
-    assert parse_model_mode_request("") is None
-    assert parse_model_mode_request(None) is None
+def test_parse_model_mode():
+    assert parse_model_mode("switch to fast mode") == ("switch", "fast")
+    assert parse_model_mode("use the quality model") == ("switch", "quality")
+    assert parse_model_mode("which model are you using") == ("status", "")
+    assert parse_model_mode("what is python") is None
+    assert parse_model_mode("") is None

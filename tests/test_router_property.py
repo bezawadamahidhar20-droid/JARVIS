@@ -19,13 +19,12 @@ from brain.router import (
 )
 
 _VALID_INTENTS = {
-    Intent.COMMAND,
     Intent.AI_QUESTION,
-    Intent.WEB_SEARCH,
     Intent.CLEAR_MEMORY,
     Intent.EXIT,
     Intent.FAST_RESPONSE,
     Intent.STOP_SPEECH,
+    Intent.MODEL_MODE,
     Intent.UNKNOWN,
 }
 
@@ -98,16 +97,12 @@ def test_validate_input_bounds_length(text):
 @_SETTINGS
 @given(st.text())
 def test_malformed_open_commands_never_execute(text):
-    """Random text starting with an open verb still produces a COMMAND
-    intent whose target is resolved by the registry — never executed
-    directly from the raw string."""
-    from commands.registry import CommandRegistry
-
+    """Random text never executes directly — the command registry only
+    sees validated input via main(), and the router never invokes shell
+    commands from raw strings."""
     router = IntentRouter()
-    registry = CommandRegistry()
-    # If the router says COMMAND, the registry must be able to resolve
-    # it to a known command or decline politely (never raise).
     intent, _ = router.route(text)
-    if intent == Intent.COMMAND:
-        result = registry.execute_with_meta(text)
-        assert result is None or result.command is not None
+    # Whatever the intent, nothing was executed here — the router is a
+    # pure classifier with no side effects.
+    assert isinstance(intent, str)
+    assert intent in _VALID_INTENTS

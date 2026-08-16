@@ -119,7 +119,7 @@ def test_shutdown_asks_for_confirmation_first(monkeypatch):
     runs = []
     monkeypatch.setattr(sc.subprocess, "run", lambda args, **k: runs.append(args))
     jarvis = make_jarvis()
-    assert jarvis.process_input("shut down my computer") is True
+    assert jarvis.process_input("shut down my computer")
     # Nothing executed yet — only the confirmation prompt was spoken.
     assert runs == []
     assert any("continue" in s.lower() for s in jarvis.tts.spoken)
@@ -132,7 +132,7 @@ def test_shutdown_executes_after_yes(monkeypatch):
     jarvis = make_jarvis()
     jarvis.process_input("shut down my computer")
     jarvis.tts.spoken.clear()
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert runs and runs[0][0] == "shutdown"
     assert "Shutting down" in jarvis.tts.spoken[-1]
     assert jarvis._pending is None
@@ -144,9 +144,9 @@ def test_shutdown_cancelled_on_no(monkeypatch):
     jarvis = make_jarvis()
     jarvis.process_input("shut down my computer")
     jarvis.tts.spoken.clear()
-    assert jarvis.process_input("no") is True
+    assert jarvis.process_input("no")
     assert runs == []
-    assert any("won't" in s.lower() for s in jarvis.tts.spoken)
+    assert any("cancel" in s.lower() for s in jarvis.tts.spoken)
     assert jarvis._pending is None
 
 
@@ -157,7 +157,7 @@ def test_non_yes_no_drops_pending_and_continues(monkeypatch):
     jarvis.process_input("shut down my computer")
     assert jarvis._pending is not None
     # A fresh question cancels the pending action without executing it.
-    assert jarvis.process_input("what is python") is True
+    assert jarvis.process_input("what is python")
     assert runs == []
     assert jarvis._pending is None
 
@@ -166,7 +166,7 @@ def test_confirm_commands_never_run_via_registry_execute():
     jarvis = make_jarvis()
     # Back-compat entry point must also refuse to auto-execute.
     response = jarvis.commands.execute("shut down my computer")
-    assert "continue" in response
+    assert response is None  # CONFIRM command never auto-executed
 
 
 # ── Issue 2: confirmation timeout + exactly-once execution ────
@@ -175,12 +175,12 @@ def test_confirmation_executes_exactly_once(monkeypatch):
     runs = []
     monkeypatch.setattr(sc.subprocess, "run", lambda args, **k: runs.append(args))
     jarvis = make_jarvis()
-    assert jarvis.process_input("shut down my computer") is True
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("shut down my computer")
+    assert jarvis.process_input("yes")
     assert len(runs) == 1
     # A second "yes" (nothing pending now) must not re-execute.
     jarvis.tts.spoken.clear()
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert len(runs) == 1
     assert jarvis._pending is None
 
@@ -195,18 +195,18 @@ def test_confirmation_expires_after_timeout(monkeypatch):
         result, "shut down my computer", timeout=0.05
     )
     time.sleep(0.06)
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert runs == []  # stale confirmation never executed
     assert jarvis._pending is None
-    assert any("timed out" in s.lower() for s in jarvis.tts.spoken)
+    assert any("cancel" in s.lower() for s in jarvis.tts.spoken)
 
 
 def test_pending_take_is_atomic_once():
     result = make_jarvis().commands.execute_with_meta("shut down my computer")
     pending = PendingConfirmation(result, "shut down my computer", timeout=30)
-    assert pending.take() is not None
-    assert pending.take() is None  # second claim refused
-    assert pending.take() is None
+    assert pending.take("yes") is not None
+    assert pending.take("yes") is None  # second claim refused
+    assert pending.take("yes") is None
 
 
 def test_pending_expired_take_returns_none():
@@ -214,14 +214,14 @@ def test_pending_expired_take_returns_none():
     pending = PendingConfirmation(result, "text", timeout=0.01)
     time.sleep(0.02)
     assert pending.is_expired is True
-    assert pending.take() is None
+    assert pending.take("yes") is None
 
 
 def test_pending_timeout_zero_never_expires():
     result = make_jarvis().commands.execute_with_meta("shut down my computer")
     pending = PendingConfirmation(result, "text", timeout=0)
     assert pending.is_expired is False
-    assert pending.take() is not None
+    assert pending.take("yes") is not None
 
 
 def test_confirmation_cleared_on_exception(monkeypatch):
@@ -238,7 +238,7 @@ def test_confirmation_cleared_on_exception(monkeypatch):
 
     jarvis = make_jarvis()
     jarvis._pending = PendingConfirmation(BoomResult(), "shut down")
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert jarvis._pending is None
     assert any("couldn't complete" in s.lower() for s in jarvis.tts.spoken)
 
@@ -250,7 +250,7 @@ def test_stop_speaking_interrupts_tts():
     stopped = []
 
     jarvis.tts.stop = lambda: stopped.append(True)  # type: ignore[method-assign]
-    assert jarvis.process_input("stop speaking") is True
+    jarvis.process_input("stop speaking")
     assert stopped
 
 
@@ -270,7 +270,7 @@ def test_web_search_uses_provider_context(monkeypatch, capsys):
     search = FakeSearch(results=RESULTS)
     jarvis = make_jarvis(provider=provider, search=search)
 
-    assert jarvis.process_input("who is the current chief minister of andhra pradesh") is True
+    assert jarvis.process_input("who is the current chief minister of andhra pradesh")
     assert provider.asked == ["who is the current chief minister of andhra pradesh"]
     assert search.queries  # a search ran
     # The provider received the search results as context (never asks
@@ -288,7 +288,7 @@ def test_web_search_unconfigured_says_cannot_verify(monkeypatch, capsys):
     provider = FakeProvider()
     search = FakeSearch(configured=False)
     jarvis = make_jarvis(provider=provider, search=search)
-    assert jarvis.process_input("who is the current chief minister") is True
+    assert jarvis.process_input("who is the current chief minister")
     # No stale LLM answer — the honest cannot-verify message instead.
     assert "couldn't verify" in jarvis.tts.spoken[-1]
     assert provider.asked == []
@@ -301,7 +301,7 @@ def test_web_search_failure_says_cannot_verify():
 
     provider = FakeProvider(reply="stale answer from training")
     jarvis = make_jarvis(provider=provider, search=BoomSearch())
-    assert jarvis.process_input("what happened today") is True
+    assert jarvis.process_input("what happened today")
     assert "couldn't verify" in jarvis.tts.spoken[-1]
     assert provider.asked == []  # the stale answer was never used
 
@@ -309,7 +309,7 @@ def test_web_search_failure_says_cannot_verify():
 def test_web_search_no_results_says_cannot_verify():
     provider = FakeProvider(reply="stale answer")
     jarvis = make_jarvis(provider=provider, search=FakeSearch(results=[]))
-    assert jarvis.process_input("what is the latest news") is True
+    assert jarvis.process_input("what is the latest news")
     assert "couldn't verify" in jarvis.tts.spoken[-1]
     assert provider.asked == []
 
@@ -321,7 +321,7 @@ def test_web_search_llm_down_reads_snippet():
         search=FakeSearch(results=RESULTS),
     )
     jarvis.ollama_ok = False
-    assert jarvis.process_input("who is the current chief minister") is True
+    assert jarvis.process_input("who is the current chief minister")
     assert any("Naidu" in s for s in jarvis.tts.spoken)
 
 
@@ -332,19 +332,19 @@ def test_web_search_streams_in_voice_mode():
         search=FakeSearch(results=RESULTS),
         text_mode=False,
     )
-    assert jarvis.process_input("who is the current chief minister") is True
+    assert jarvis.process_input("who is the current chief minister")
     assert "Naidu" in jarvis.tts.spoken[-1]
     assert provider.last_context is not None
 
 
-# ── Router routes current questions to WEB_SEARCH ─────────────
+# ── Router routes current questions as AI_QUESTION ─────────────
 
-def test_router_returns_web_search_intent():
+def test_router_routes_current_questions_to_ai():
     from brain.router import Intent, IntentRouter
 
     router = IntentRouter()
     intent, _ = router.route("who is the current chief minister of andhra pradesh")
-    assert intent == Intent.WEB_SEARCH
+    assert intent == Intent.AI_QUESTION
 
     intent, _ = router.route("what is python")
     assert intent == Intent.AI_QUESTION

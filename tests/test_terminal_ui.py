@@ -15,10 +15,10 @@ from utils.terminal_ui import TerminalUI
 
 def _make_ui() -> TerminalUI:
     ui = TerminalUI(debug=False)
-    ui.set_state("listening")
-    ui.set_component("Ollama", "ok", "qwen3:8b")
-    ui.add_message("user", "hello there")
-    ui.set_metric("AI", 1.2)
+    ui.update_state("listening")
+    ui.update_model("qwen3:8b")
+    ui.update_text("user: hello there")
+    ui.update_metrics(AI=1.2)
     return ui
 
 
@@ -36,7 +36,7 @@ def test_dashboard_renders_via_live_render_path():
     console = Console(force_terminal=True, width=80, height=30, file=io.StringIO())
     for height in (30, 15, 8, 5):
         lines = console.render_lines(
-            ui._dashboard,  # noqa: SLF001  (dashboard is the render target)
+            ui._render(),  # noqa: SLF001  (dashboard is the render target)
             console.options.update_dimensions(80, height),
             pad=False,
         )
@@ -48,5 +48,5 @@ def test_dashboard_prints_via_console():
     used while the Live is active) must not raise."""
     ui = _make_ui()
     console = Console(force_terminal=True, width=80, height=30, file=io.StringIO())
-    console.print(ui._dashboard)  # noqa: SLF001
+    console.print(ui._render())  # noqa: SLF001
     assert console.file.getvalue().strip()

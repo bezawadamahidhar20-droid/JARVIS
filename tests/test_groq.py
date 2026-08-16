@@ -1,12 +1,10 @@
-"""Issue 8 — Groq fallback provider (all HTTP mocked, no key required).
+"""Issue 8 — Groq provider (all HTTP mocked, no key required).
 
-Ollama stays the primary provider; Groq is optional and must degrade
-gracefully with no API key.
+Groq is optional and must degrade gracefully with no API key.
 """
 
 import brain.groq_client as gc
 from brain.groq_client import GroqClient
-from brain.llm import FallbackProvider, create_provider
 
 
 class FakeResponse:
@@ -121,124 +119,31 @@ def test_ask_stream_emits_sentences(monkeypatch):
     assert spoken == ["First sentence.", "Second sentence!"]
 
 
-# ── FallbackProvider ──────────────────────────────────────────
-
-class FakePrimary:
-    name = "ollama"
-
-    def __init__(self, available=True):
-        self.available = available
-        self.asks = 0
-
-    def is_available(self):
-        return self.available
-
-    def ask(self, user_input, memory=None, context=None):
-        self.asks += 1
-        if not self.available:
-            return None
-        return "primary answer"
-
-    def ask_stream(self, user_input, memory=None, on_sentence=None, context=None):
-        if not self.available:
-            return None
-        if on_sentence:
-            on_sentence("primary answer")
-        return "primary answer"
-
-    def describe(self):
-        return "ollama (primary)"
-
-    def warmup(self):
-        pass
-
-
-class FakeGroq:
-    name = "groq"
-
-    def __init__(self):
-        self.asks = 0
-
-    def is_available(self):
-        return True
-
-    def ask(self, user_input, memory=None, context=None):
-        self.asks += 1
-        return "groq fallback answer"
-
-    def ask_stream(self, user_input, memory=None, on_sentence=None, context=None):
-        self.asks += 1
-        if on_sentence:
-            on_sentence("groq fallback answer")
-        return "groq fallback answer"
-
-    def describe(self):
-        return "groq"
-
-
-def test_primary_used_when_available():
-    primary, fallback = FakePrimary(available=True), FakeGroq()
-    provider = FallbackProvider(primary, fallback)
-    assert provider.ask("hi") == "primary answer"
-    assert provider.ask_stream("hi") == "primary answer"
-    assert fallback.asks == 0
-
-
-def test_fallback_used_when_primary_down():
-    primary, fallback = FakePrimary(available=False), FakeGroq()
-    provider = FallbackProvider(primary, fallback)
-    assert provider.ask("hi") == "groq fallback answer"
-    assert provider.ask_stream("hi") == "groq fallback answer"
-    assert fallback.asks == 2
-
-
-def test_fallback_is_available_when_primary_down():
-    provider = FallbackProvider(FakePrimary(available=False), FakeGroq())
-    assert provider.is_available() is True
-
-
-def test_no_fallback_when_none_given():
-    primary = FakePrimary(available=False)
-    provider = FallbackProvider(primary, None)
-    assert provider.ask("hi") is None
-    assert provider.is_available() is False
-
-
 # ── Factory wiring ────────────────────────────────────────────
 
-def test_create_provider_ollama_with_groq_key_wraps_fallback(monkeypatch):
-    from config import groq_config
+def test_create_provider_groq_when_configured(monkeypatch):
+    from brain.llm import create_provider
+    from config import jarvis_config
 
-    monkeypatch.setattr(groq_config, "API_KEY", "key-123")
-    monkeypatch.setattr(
-        "brain.ollama_client.requests.get",
-        lambda *a, **k: type("R", (), {
-            "status_code": 200,
-            "json": lambda self: {"models": [{"name": "qwen3:8b"}]},
-        })(),
-    )
-    provider = create_provider("ollama")
-    assert isinstance(provider, FallbackProvider)
-    assert provider.primary.name == "ollama"
-    assert provider.fallback is not None
-
-
-def test_create_provider_ollama_without_key_is_plain(monkeypatch):
-    monkeypatch.setattr(gc, "GROQ_API_KEY", "")
-    monkeypatch.setattr(
-        "brain.ollama_client.requests.get",
-        lambda *a, **k: type("R", (), {
-            "status_code": 200,
-            "json": lambda self: {"models": [{"name": "qwen3:8b"}]},
-        })(),
-    )
-    provider = create_provider("ollama")
-    assert not isinstance(provider, FallbackProvider)
-    assert provider.name == "ollama"
-
-
-def test_create_provider_groq_explicit(monkeypatch):
+    monkeypatch.setattr(jarvis_config, "AI_PROVIDER", "groq")
     monkeypatch.setattr(gc, "GROQ_API_KEY", "key-123")
-    provider = create_provider("groq")
+    provider = create_provider()
     assert provider.name == "groq"
     assert provider.is_configured()
+
+
+def test_create_provider_ollama_by_default(monkeypatch):
+    from brain.llm import create_provider
+    from config import jarvis_config
+
+    monkeypatch.setattr(jarvis_config, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(
+        "brain.ollama_client.requests.get",
+        lambda *a, **k: type("R", (), {
+            "status_code": 200,
+            "json": lambda self: {"models": [{"name": "qwen3:8b"}]},
+        })(),
+    )
+    provider = create_provider()
+    assert provider.name == "ollama"
+

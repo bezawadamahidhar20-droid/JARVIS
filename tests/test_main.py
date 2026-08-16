@@ -69,11 +69,11 @@ class FakeProvider:
     def is_available(self):
         return self.available
 
-    def ask(self, user_input, memory=None):
+    def ask(self, user_input, memory=None, context=None):
         self.asked.append(user_input)
         return self.reply
 
-    def ask_stream(self, user_input, memory=None, on_sentence=None):
+    def ask_stream(self, user_input, memory=None, on_sentence=None, context=None):
         self.asked.append(user_input)
         if on_sentence:
             on_sentence(self.reply)
@@ -98,33 +98,36 @@ def make_jarvis(provider=None, text_mode=True, stt=None):
     )
 
 
-def test_exit_returns_false():
+def test_exit_stops_jarvis():
     jarvis = make_jarvis()
-    assert jarvis.process_input("goodbye") is False
+    assert jarvis.process_input("goodbye") is None
+    assert jarvis.running is False
 
 
 def test_exit_variants():
     jarvis = make_jarvis()
     for phrase in ("exit", "quit", "shutdown jarvis", "bye"):
-        assert jarvis.process_input(phrase) is False, phrase
+        jarvis.running = True
+        assert jarvis.process_input(phrase) is None, phrase
+        assert jarvis.running is False, phrase
 
 
-def test_fast_response_returns_true():
+def test_fast_response_returns_truthy():
     jarvis = make_jarvis()
-    assert jarvis.process_input("hello") is True
+    assert jarvis.process_input("hello")
     assert jarvis.tts.spoken  # something was spoken
 
 
-def test_command_returns_true():
+def test_command_returns_truthy():
     jarvis = make_jarvis()
-    assert jarvis.process_input("what time is it") is True
+    assert jarvis.process_input("what time is it")
     assert any("It's" in s for s in jarvis.tts.spoken)
 
 
 def test_ai_question_uses_provider():
     provider = FakeProvider(reply="Python is a language.")
     jarvis = make_jarvis(provider=provider)
-    assert jarvis.process_input("what is python") is True
+    assert jarvis.process_input("what is python")
     assert provider.asked == ["what is python"]
     # Response spoken + stored in memory.
     assert "Python is a language." in jarvis.tts.spoken
@@ -134,7 +137,7 @@ def test_ai_question_uses_provider():
 def test_ai_stream_uses_sentences_in_voice_mode():
     provider = FakeProvider(reply="First sentence. Second sentence.")
     jarvis = make_jarvis(provider=provider, text_mode=False)
-    assert jarvis.process_input("explain recursion") is True
+    assert jarvis.process_input("explain recursion")
     assert provider.asked == ["explain recursion"]
 
 
@@ -217,16 +220,16 @@ def test_provider_offline_speaks_error_and_continues():
     jarvis = make_jarvis(provider=provider)
     assert jarvis.ollama_ok is False
     # Local commands still work.
-    assert jarvis.process_input("what time is it") is True
+    assert jarvis.process_input("what time is it")
     # AI questions get the offline message, not a crash.
-    assert jarvis.process_input("what is python") is True
+    assert jarvis.process_input("what is python")
     assert any("offline" in s.lower() for s in jarvis.tts.spoken)
 
 
 def test_empty_input_ignored():
     jarvis = make_jarvis()
-    assert jarvis.process_input("") is True
-    assert jarvis.process_input("   ") is True
+    assert jarvis.process_input("") is None
+    assert jarvis.process_input("   ") is None
 
 
 def test_clear_memory():

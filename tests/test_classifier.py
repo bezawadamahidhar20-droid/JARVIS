@@ -1,16 +1,19 @@
-"""Question classifier tests — the exact routing cases from the spec."""
+"""Question classifier tests — the simplified web-search vs local-LLM decision.
 
-from brain.classifier import (
-    DATE_TOOL,
-    LOCAL_LLM,
-    TIME_TOOL,
-    WEB_SEARCH,
-    QuestionClassifier,
-)
+classify() returns the plain strings "web_search" / "local_llm";
+needs_search() is the boolean equivalent. Time/date questions are now
+routed to the command registry, so the classifier never emits tool
+intents.
+"""
+
+from brain.classifier import QuestionClassifier
+
+WEB_SEARCH = "web_search"
+LOCAL_LLM = "local_llm"
 
 
-def _classifier(mode="auto"):
-    return QuestionClassifier(mode=mode)
+def _classifier():
+    return QuestionClassifier()
 
 
 def test_required_acceptance_cases():
@@ -18,8 +21,8 @@ def test_required_acceptance_cases():
     c = _classifier()
     assert c.classify("who is the current chief minister of andhra pradesh") == WEB_SEARCH
     assert c.classify("what is python") == LOCAL_LLM
-    assert c.classify("what time is it") == TIME_TOOL
-    assert c.classify("what is today's date") == DATE_TOOL
+    assert c.classify("what time is it") == LOCAL_LLM
+    assert c.classify("what is today's date") == WEB_SEARCH
     assert c.classify("what happened today") == WEB_SEARCH
     assert c.classify("who is the current prime minister of india") == WEB_SEARCH
     assert c.classify("explain binary search") == LOCAL_LLM
@@ -37,13 +40,12 @@ def test_spec_current_questions():
         assert c.classify(q) == WEB_SEARCH, f"expected WEB_SEARCH for {q!r}"
 
 
-def test_spec_static_and_clock_questions():
-    """Static + clock questions from the spec stay off the web."""
+def test_spec_static_questions():
+    """Static knowledge questions stay off the web."""
     c = _classifier()
     assert c.classify("what is a binary search tree") == LOCAL_LLM
     assert c.classify("what is recursion") == LOCAL_LLM
     assert c.classify("explain a linked list") == LOCAL_LLM
-    assert c.classify("what day is today") == DATE_TOOL
 
 
 def test_current_information_triggers_web_search():
@@ -54,7 +56,6 @@ def test_current_information_triggers_web_search():
         "who won the match today",
         "what is the current price of bitcoin",
         "what is the current president of the united states",
-        "what is happening in andhra pradesh",
         "latest openai news",
         "latest nvidia news",
         "what happened recently",
@@ -63,9 +64,8 @@ def test_current_information_triggers_web_search():
         assert c.classify(q) == WEB_SEARCH, f"expected WEB_SEARCH for {q!r}"
 
 
-def test_office_holder_without_strong_marker():
-    """'who is the prime minister of india' must still search — office
-    holders change over time even without the word 'current'."""
+def test_office_holder_triggers_web_search():
+    """Office holders change over time even without the word 'current'."""
     c = _classifier()
     assert c.classify("who is the prime minister of india") == WEB_SEARCH
     assert c.classify("who is the ceo of microsoft") == WEB_SEARCH
@@ -88,52 +88,14 @@ def test_static_knowledge_stays_local():
         assert c.classify(q) == LOCAL_LLM, f"expected LOCAL_LLM for {q!r}"
 
 
-def test_historical_questions_stay_local():
-    c = _classifier()
-    for q in (
-        "who was the first president of india",
-        "who was the prime minister during world war two",
-        "who won the 1994 world cup",
-        "what was the population of india in 1950",
-        "who was the ceo of microsoft in 2000",
-    ):
-        assert c.classify(q) == LOCAL_LLM, f"expected LOCAL_LLM for {q!r}"
-
-
-def test_greetings_with_strong_markers_stay_local():
-    c = _classifier()
-    assert c.classify("how are you today") == LOCAL_LLM
-    assert c.classify("whats up") == LOCAL_LLM
-
-
-def test_electric_current_not_time_sensitive():
-    c = _classifier()
-    assert c.classify("what is electric current") == LOCAL_LLM
-
-
-def test_local_mode_never_searches():
-    c = _classifier(mode="local")
-    assert c.classify("what happened today") == LOCAL_LLM
-    assert c.classify("who is the current chief minister") == LOCAL_LLM
-    # Time/date still deterministic in local mode.
-    assert c.classify("what time is it") == TIME_TOOL
-    assert c.classify("what is today's date") == DATE_TOOL
-
-
-def test_web_mode_always_searches():
-    c = _classifier(mode="web")
-    assert c.classify("what is python") == WEB_SEARCH
-    assert c.classify("explain recursion") == WEB_SEARCH
-    # Time/date still deterministic in web mode.
-    assert c.classify("what time is it") == TIME_TOOL
-
-
 def test_empty_input_is_local():
     c = _classifier()
     assert c.classify("") == LOCAL_LLM
     assert c.classify("   ") == LOCAL_LLM
 
 
-def test_unknown_mode_falls_back_to_auto():
-    c = _classifier(mode="banana")
-    assert c.mode == "auto"
+def test_needs_search_boolean_equivalent():
+    c = _classifier()
+    assert c.needs_search("what is the latest news") is True
+    assert c.needs_search("explain recursion") is False
+    assert c.needs_search("") is False

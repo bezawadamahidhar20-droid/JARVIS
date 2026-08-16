@@ -55,4 +55,4 @@ def test_router_fast_response_with_variant():
 def test_router_command_with_variant():
     router = IntentRouter()
     intent, _ = router.route("lajad open notepad")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION

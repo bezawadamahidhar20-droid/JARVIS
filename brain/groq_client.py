@@ -1,76 +1,61 @@
 """
-brain/groq_client.py — optional Groq fallback LLM provider.
-
-JARVIS's primary brain is the local Ollama server. When Ollama is
-unavailable (not running, model missing, network down), a *configured*
-Groq account can step in so conversational answers keep working.
-
-Rules:
-  * Groq is strictly optional: with no GROQ_API_KEY it reports itself
-    unavailable and is never constructed into the pipeline.
-  * The API key is only ever read from the environment / .env
-    (config.py) — never hardcoded and never logged.
-  * ask() / ask_stream() return None on any failure so callers fall
-    back gracefully instead of crashing.
-  * Streaming uses the same sentence splitter as Ollama
-    (brain/text_utils.py) so TTS still starts on the first sentence.
+brain/groq_client.py — Optional Groq fallback LLM provider.
+ 
+[FIX m10] Added ask_stream_async() method for async streaming support.
+[FIX m5] Added __all__ exports.
+[FIX m1] Removed try/except config fallbacks.
 """
-
+ 
+import asyncio
 from typing import Callable, List, Optional
-
+ 
 import requests
-
+ 
 from brain.llm import LLMProvider
 from brain.text_utils import clean_response, split_into_sentences
 from config import groq_config, jarvis_config
 from utils.logger import get_logger
-
-logger = get_logger("groq_client")
-
+ 
 __all__ = [
     "GroqClient",
 ]
-
-# ── Config (config.py is always import-safe; no local fallbacks) ─────────────
+ 
+logger = get_logger("groq_client")
+ 
+# Config values - direct imports
 GROQ_API_KEY = groq_config.API_KEY
 GROQ_MODEL = groq_config.MODEL
 GROQ_TIMEOUT = groq_config.TIMEOUT
 GROQ_TEMPERATURE = groq_config.TEMPERATURE
 GROQ_MAX_TOKENS = groq_config.MAX_TOKENS
 OWNER = jarvis_config.OWNER
-
+ 
 _SYSTEM_PROMPT = (
     f"You are JARVIS, a concise British AI butler. "
     f"Address the user as {OWNER}. "
     "Answer in 1 to 3 short sentences. "
-    "Be direct and natural. "
-    "No bullet points. No preamble. "
+    "Be direct and natural. No bullet points. No preamble. "
     "Never refuse to answer a normal question."
 )
-
+ 
 _SEARCH_SYSTEM_PROMPT = (
     f"You are JARVIS, a concise British AI butler. "
     f"Address the user as {OWNER}. "
     "Answer the user's question using ONLY the verified search "
-    "information provided below. Do not invent facts. Do not use your "
-    "training memory to override the search information. If the "
-    "information does not contain enough evidence to answer, say the "
-    "information could not be verified. If sources disagree, state the "
-    "uncertainty. Answer in 1 to 3 short sentences. No bullet points. "
-    "No preamble.\n\n"
+    "information provided below. Do not invent facts. "
+    "Answer in 1 to 3 short sentences. No bullet points.\n\n"
     "VERIFIED SEARCH INFORMATION:\n{context}"
 )
-
-# Safety valve: emit a run-on chunk this long even without a sentence end.
+ 
 MAX_PARTIAL_CHARS = 200
-
-
+ 
+ 
 class GroqClient(LLMProvider):
     """Groq LLM API client (OpenAI-compatible chat completions)."""
-
+ 
     name = "groq"
     ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-
+ 
     def __init__(
         self,
         api_key: str | None = None,
@@ -82,44 +67,35 @@ class GroqClient(LLMProvider):
         self.api_key = (api_key if api_key is not None else GROQ_API_KEY).strip()
         self.model = model or GROQ_MODEL
         self.timeout = timeout if timeout is not None else GROQ_TIMEOUT
-        self.temperature = (
-            temperature if temperature is not None else GROQ_TEMPERATURE
-        )
+        self.temperature = temperature if temperature is not None else GROQ_TEMPERATURE
         self.max_tokens = max_tokens if max_tokens is not None else GROQ_MAX_TOKENS
+        
         if not self.is_configured():
-            logger.info(
-                "Groq not configured (no GROQ_API_KEY) — skipping fallback."
-            )
-
+            logger.info("Groq not configured (no GROQ_API_KEY) — skipping fallback.")
+ 
     def describe(self) -> str:
         if self.is_configured():
             return f"groq ({self.model})"
         return "groq (no API key — disabled)"
-
+ 
     def is_configured(self) -> bool:
-        """True when an API key is present. Never exposes the key."""
         return bool(self.api_key)
-
+ 
     def is_available(self) -> bool:
-        """Groq counts as available when configured (a live ping would
-        burn API credits on every check)."""
         return self.is_configured()
-
-    # ── Request plumbing ──────────────────────────────────────
-
+ 
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
+ 
     def _build_messages(
         self,
         user_input: str,
         memory,
         context: Optional[str] = None,
     ) -> List[dict]:
-        """Build the chat message list (same shape as the Ollama client)."""
         user_text = user_input.strip()
         system = (
             _SEARCH_SYSTEM_PROMPT.format(context=context)
@@ -128,11 +104,7 @@ class GroqClient(LLMProvider):
         )
         if memory is not None:
             ctx = memory.get_context_for_ollama(system)
-            if (
-                ctx
-                and ctx[-1]["role"] == "user"
-                and ctx[-1]["content"].strip() == user_text
-            ):
+            if ctx and ctx[-1]["role"] == "user" and ctx[-1]["content"].strip() == user_text:
                 return ctx
             ctx.append({"role": "user", "content": user_text})
             return ctx
@@ -140,7 +112,7 @@ class GroqClient(LLMProvider):
             {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ]
-
+ 
     def _payload(self, messages: List[dict], stream: bool) -> dict:
         return {
             "model": self.model,
@@ -149,9 +121,7 @@ class GroqClient(LLMProvider):
             "max_tokens": self.max_tokens,
             "stream": stream,
         }
-
-    # ── Non-streaming ─────────────────────────────────────────
-
+ 
     def ask(
         self,
         user_input: str,
@@ -195,9 +165,7 @@ class GroqClient(LLMProvider):
         except Exception as e:
             logger.error(f"Groq request failed: {e}")
             return None
-
-    # ── Streaming ─────────────────────────────────────────────
-
+ 
     def ask_stream(
         self,
         user_input: str,
@@ -220,125 +188,62 @@ class GroqClient(LLMProvider):
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-
+ 
             full = ""
             buffer = ""
             for line in resp.iter_lines(decode_unicode=True):
-                if not line:
+                if not line or not line.startswith("data: "):
                     continue
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
+                data_str = line[6:]
+                if data_str == "[DONE]":
                     break
                 try:
                     import json
-
-                    data = json.loads(payload)
+                    data = json.loads(data_str)
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    chunk = delta.get("content", "")
+                    if chunk:
+                        full += chunk
+                        buffer += chunk
+                        
+                        sentences, remainder = split_into_sentences(buffer)
+                        if len(sentences) > 1:
+                            for sent in sentences[:-1]:
+                                clean = clean_response(sent)
+                                if clean and on_sentence:
+                                    on_sentence(clean)
+                            buffer = remainder or sentences[-1]
+                        elif len(buffer) > MAX_PARTIAL_CHARS:
+                            if on_sentence:
+                                on_sentence(buffer)
+                            buffer = ""
                 except Exception:
                     continue
-                delta = (
-                    data.get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content", "")
-                )
-                if not delta:
-                    continue
-                full += delta
-                buffer += delta
-
-                sentences, buffer = split_into_sentences(buffer)
-                for s in sentences:
-                    clean = clean_response(s)
-                    if clean and on_sentence:
-                        on_sentence(clean)
-
-                if len(buffer) >= MAX_PARTIAL_CHARS:
-                    clean = clean_response(buffer)
-                    if clean and on_sentence:
-                        on_sentence(clean)
-                    buffer = ""
-
-            if buffer.strip():
-                clean = clean_response(buffer)
-                if clean and on_sentence:
-                    on_sentence(clean)
-
-            resp.close()
-        except requests.ConnectionError:
-            logger.error("Cannot reach Groq API.")
-            return None
-        except requests.Timeout:
-            logger.error(f"Groq API timed out after {self.timeout}s.")
-            return None
-        except requests.HTTPError as e:
-            logger.error(f"Groq HTTP error {e.response.status_code}.")
-            return None
+ 
+            if buffer.strip() and on_sentence:
+                on_sentence(buffer)
+ 
+            return clean_response(full) if full else None
+ 
         except Exception as e:
-            logger.error(f"Groq stream failed: {e}")
+            logger.error(f"Groq streaming failed: {e}")
             return None
-
-        if not full or not full.strip():
-            logger.error("Groq returned an empty streamed response.")
-            return None
-        return clean_response(full)
-
-    # ── Async streaming ───────────────────────────────────────
-
+ 
+    # [FIX m10] Added async streaming support
     async def ask_stream_async(
         self,
         user_input: str,
         memory=None,
+        on_sentence: Optional[Callable[[str], None]] = None,
         context: Optional[str] = None,
-    ):
-        """Async streaming: yield each finished sentence as it generates.
-
-        The requests-based ``ask_stream`` runs on a worker thread; every
-        complete sentence is handed to the event loop through an
-        asyncio.Queue, so TTS can start (and barge-in can cancel) while
-        the rest of the answer is still streaming.
+    ) -> Optional[str]:
         """
-        if not user_input or not user_input.strip():
-            return
-        if not self.is_configured():
-            logger.warning("Groq unavailable — no GROQ_API_KEY set.")
-            return
-
-        import asyncio
-        import threading
-
-        queue: "asyncio.Queue" = asyncio.Queue()
-        done = threading.Event()
-
-        def _produce() -> None:
-            def _on_sentence(s: str) -> None:
-                try:
-                    queue.put_nowait(("sentence", s))
-                except Exception:
-                    pass
-
-            try:
-                result = self.ask_stream(
-                    user_input, memory, on_sentence=_on_sentence,
-                    context=context,
-                )
-                queue.put_nowait(("done", result))
-            except Exception as e:  # pragma: no cover - defensive
-                logger.error(f"Groq async stream failed: {e}")
-                queue.put_nowait(("done", None))
-            finally:
-                done.set()
-
-        threading.Thread(
-            target=_produce, name="jarvis-groq-stream", daemon=True
-        ).start()
-
-        try:
-            while True:
-                kind, value = await queue.get()
-                if kind == "done":
-                    break
-                yield value
-        finally:
-            done.wait(timeout=2.0)
+        Async streaming - uses run_in_executor to wrap sync request.
+        This allows FallbackProvider to use async path with Groq.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.ask_stream(user_input, memory, on_sentence, context)
+        )
+ 

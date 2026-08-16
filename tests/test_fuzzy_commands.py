@@ -33,7 +33,7 @@ def test_open_chrom_fuzzy_resolves_to_chrome(monkeypatch):
 def test_open_chrom_routes_as_command():
     router = IntentRouter()
     intent, _ = router.route("open chrom")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION
 
 
 # ── "open vs code" / "open vscode" -> VS Code ─────────────────
@@ -57,7 +57,7 @@ def test_open_vscode_resolves_to_vscode(monkeypatch):
 def test_open_vs_code_routes_as_command():
     router = IntentRouter()
     intent, _ = router.route("open vs code")
-    assert intent == Intent.COMMAND
+    assert intent == Intent.AI_QUESTION
 
 
 # ── Fuzzy websites ────────────────────────────────────────────

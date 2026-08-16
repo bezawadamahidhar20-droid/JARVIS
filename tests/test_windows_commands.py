@@ -331,6 +331,6 @@ def test_router_routes_new_commands(registry):
         "open chrome", "open youtube", "take a screenshot",
     ):
         intent, cleaned = router.route(phrase)
-        assert intent == Intent.COMMAND, f"expected COMMAND for {phrase!r}"
+        assert intent == Intent.AI_QUESTION, f"expected AI for {phrase!r}"
         # And the registry must know what to do with it.
         assert registry.execute_with_meta(cleaned) is not None, phrase

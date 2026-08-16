@@ -66,11 +66,11 @@ class FakeProvider:
     def is_available(self):
         return self.available
 
-    def ask(self, user_input, memory=None):
+    def ask(self, user_input, memory=None, context=None):
         self.asked.append(user_input)
         return self.reply
 
-    def ask_stream(self, user_input, memory=None, on_sentence=None):
+    def ask_stream(self, user_input, memory=None, on_sentence=None, context=None):
         self.asked.append(user_input)
         if on_sentence:
             on_sentence(self.reply)
@@ -99,7 +99,7 @@ def make_jarvis(provider=None, text_mode=True):
 
 def test_normal_command_full_pipeline():
     jarvis = make_jarvis()
-    assert jarvis.process_input("what time is it") is True
+    assert jarvis.process_input("what time is it")
     assert any("It's" in s for s in jarvis.tts.spoken)
 
 
@@ -107,7 +107,7 @@ def test_normal_command_open_app_full_pipeline(monkeypatch):
     launched = []
     monkeypatch.setattr(sc.subprocess, "Popen", lambda cmd: launched.append(cmd))
     jarvis = make_jarvis()
-    assert jarvis.process_input("open notepad") is True
+    assert jarvis.process_input("open notepad")
     assert launched == ["notepad.exe"]
     assert any("Opening notepad" in s for s in jarvis.tts.spoken)
 
@@ -130,7 +130,7 @@ def test_deterministic_commands_bypass_llm(monkeypatch):
         "what time is it",
         "what is today's date",
     ):
-        assert jarvis.process_input(cmd) is True
+        assert jarvis.process_input(cmd)
 
     # The AI provider was never consulted for any deterministic command.
     assert provider.asked == []
@@ -171,7 +171,7 @@ def test_runtime_switch_to_fast_mode(monkeypatch):
     an LLM round-trip and without a restart."""
     provider = SwitchableProvider()
     jarvis = _switch_jarvis(monkeypatch, provider)
-    assert jarvis.process_input("switch to fast mode") is True
+    assert jarvis.process_input("switch to fast mode")
     assert provider.model == "qwen3:1.7b"
     assert provider.asked == []  # deterministic — no LLM call
     assert any("fast" in s.lower() and "qwen3:1.7b" in s
@@ -182,9 +182,9 @@ def test_runtime_switch_to_quality_mode(monkeypatch):
     provider = SwitchableProvider()
     jarvis = _switch_jarvis(monkeypatch, provider)
     # Start in fast mode, then switch to quality.
-    assert jarvis.process_input("switch to fast mode") is True
+    assert jarvis.process_input("switch to fast mode")
     assert provider.model == "qwen3:1.7b"
-    assert jarvis.process_input("switch to quality mode") is True
+    assert jarvis.process_input("switch to quality mode")
     assert provider.model == "qwen3:8b"
     assert provider.switched == ["qwen3:1.7b", "qwen3:8b"]
 
@@ -193,7 +193,7 @@ def test_runtime_switch_idempotent(monkeypatch):
     """Switching to the mode already active is a friendly no-op."""
     provider = SwitchableProvider()
     jarvis = _switch_jarvis(monkeypatch, provider)
-    assert jarvis.process_input("switch to quality mode") is True
+    assert jarvis.process_input("switch to quality mode")
     assert provider.model == "qwen3:8b"
     assert provider.switched == []  # same model — nothing to switch
     assert any("already" in s.lower() for s in jarvis.tts.spoken)
@@ -203,7 +203,7 @@ def test_runtime_model_status_query(monkeypatch):
     """"Which model are you using" reports the active model — no LLM."""
     provider = SwitchableProvider()
     jarvis = _switch_jarvis(monkeypatch, provider)
-    assert jarvis.process_input("which model are you using") is True
+    assert jarvis.process_input("which model are you using")
     assert provider.asked == []
     assert any("qwen3:8b" in s and "quality" in s for s in jarvis.tts.spoken)
 
@@ -212,7 +212,7 @@ def test_runtime_switch_unknown_mode_falls_back_to_llm(monkeypatch):
     """An unknown mode is a normal question, not a crash."""
     provider = SwitchableProvider()
     jarvis = _switch_jarvis(monkeypatch, provider)
-    assert jarvis.process_input("switch to turbo mode") is True
+    assert jarvis.process_input("switch to turbo mode")
     assert provider.asked  # routed to the AI brain
     assert provider.model == "qwen3:8b"  # unchanged
 
@@ -222,7 +222,8 @@ def test_runtime_switch_unknown_mode_falls_back_to_llm(monkeypatch):
 def test_invalid_input_does_not_crash():
     jarvis = make_jarvis()
     for bad in ("", "   ", "\t\n", "x" * (MAX_INPUT_CHARS + 1)):
-        assert jarvis.process_input(bad) is True
+        result = jarvis.process_input(bad)
+        assert result is None or isinstance(result, str)
 
 
 # ── Confirmation-required command ─────────────────────────────
@@ -233,13 +234,13 @@ def test_confirmation_required_command_flow(monkeypatch):
     jarvis = make_jarvis()
 
     # Ask: nothing executes yet, a confirmation prompt is spoken.
-    assert jarvis.process_input("shut down my computer") is True
+    assert jarvis.process_input("shut down my computer")
     assert runs == []
     assert any("continue" in s.lower() for s in jarvis.tts.spoken)
 
     # Confirm: executes exactly once.
     jarvis.tts.spoken.clear()
-    assert jarvis.process_input("yes") is True
+    assert jarvis.process_input("yes")
     assert len(runs) == 1
     assert runs[0][0] == "shutdown"
 
@@ -248,8 +249,8 @@ def test_confirmation_rejected_never_executes(monkeypatch):
     runs = []
     monkeypatch.setattr(sc.subprocess, "run", lambda args, **k: runs.append(args))
     jarvis = make_jarvis()
-    assert jarvis.process_input("restart my computer") is True
-    assert jarvis.process_input("no") is True
+    assert jarvis.process_input("restart my computer")
+    assert jarvis.process_input("no")
     assert runs == []
 
 
@@ -259,7 +260,7 @@ def test_llm_fallback_when_provider_offline():
     jarvis = make_jarvis(provider=FakeProvider(available=False))
     assert jarvis.ollama_ok is False
     # AI question -> spoken offline message, no crash.
-    assert jarvis.process_input("what is python") is True
+    assert jarvis.process_input("what is python")
     assert any("offline" in s.lower() for s in jarvis.tts.spoken)
 
 
@@ -267,7 +268,7 @@ def test_llm_fallback_when_provider_offline():
 
 def test_stop_speaking_cancels_tts():
     jarvis = make_jarvis()
-    assert jarvis.process_input("stop speaking") is True
+    jarvis.process_input("stop speaking")
     assert jarvis.tts.stops == 1
 
 

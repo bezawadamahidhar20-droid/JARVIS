@@ -1,27 +1,24 @@
 """
 brain/circuit_breaker.py — Circuit breaker for external service calls.
-
-Why: if Ollama becomes unresponsive mid-session (timeout, OOM kill,
-network blip), every AI request would otherwise block for the full
-OLLAMA_TIMEOUT before failing. After ``failure_threshold`` consecutive
-failures the breaker *opens* and callers fast-fail immediately
-("AI offline") instead of hanging; after ``recovery_timeout`` it goes
-half-open and lets one probe through — success closes it, failure
-re-opens it. The service auto-recovers the moment it comes back.
-
-Thread-safe: all state transitions are guarded by a lock, so the warm-up
-thread and the main loop can share one breaker safely.
+ 
+[FIX M7] Added half-open state tracking. If a failure occurs during
+half-open, immediately re-open the breaker instead of requiring
+another threshold failures.
+ 
+Thread-safe: all state transitions are guarded by a lock.
 """
-
+ 
 import threading
 import time
-
+ 
 from brain.exceptions import CircuitOpenError
-
-
+ 
+__all__ = ["CircuitBreaker", "CircuitOpenError"]
+ 
+ 
 class CircuitBreaker:
     """Tracks failure counts and exposes fast-fail state."""
-
+ 
     def __init__(
         self,
         failure_threshold: int = 3,
@@ -34,12 +31,13 @@ class CircuitBreaker:
         self._lock = threading.Lock()
         self._failures = 0
         self._open_until = 0.0
-
+        self._half_open = False  # [FIX M7] Track half-open state
+ 
     @property
     def is_open(self) -> bool:
         """True when calls should fast-fail.
-
-        False once ``recovery_timeout`` has elapsed (half-open state —
+ 
+        False once recovery_timeout has elapsed (half-open state —
         the caller may send one probe request).
         """
         if not self.enabled or self.recovery_timeout <= 0:
@@ -47,45 +45,49 @@ class CircuitBreaker:
         with self._lock:
             if self._open_until == 0.0:
                 return False
-            return time.monotonic() < self._open_until
-
+            now = time.monotonic()
+            if now >= self._open_until:
+                # [FIX M7] Entering half-open state
+                self._half_open = True
+                return False
+            return True
+ 
     def record_success(self) -> None:
         """A call succeeded — reset the failure streak and close."""
         with self._lock:
             self._failures = 0
             self._open_until = 0.0
-
+            self._half_open = False  # [FIX M7]
+ 
     def record_failure(self) -> None:
         """A call failed — open the breaker at the threshold.
-
-        Half-open handling: if the recovery window has elapsed, the next
-        caller is allowed through as a single probe. If that probe fails,
-        the breaker must re-open IMMEDIATELY (not wait for another
-        ``failure_threshold`` failures), otherwise a dead backend would
-        hang the assistant for 3 × timeout on every recovery attempt.
+        
+        [FIX M7] If in half-open state, immediately re-open without
+        waiting for threshold failures.
         """
         with self._lock:
-            if not self.enabled:
-                return
-            if self._open_until > 0.0 and time.monotonic() >= self._open_until:
-                # A half-open probe failed — re-open right away.
+            # [FIX M7] Immediate re-open during half-open probe failure
+            if self._half_open:
                 self._open_until = time.monotonic() + self.recovery_timeout
+                self._half_open = False
                 self._failures = 0
                 return
+            
             self._failures += 1
             if self._failures >= self.failure_threshold:
                 self._open_until = time.monotonic() + self.recovery_timeout
-                self._failures = 0
-
+                self._failures = 0  # Reset for next cycle
+ 
     def reset(self) -> None:
         """Force the breaker closed (used by tests / explicit recovery)."""
         with self._lock:
             self._failures = 0
             self._open_until = 0.0
-
+            self._half_open = False  # [FIX M7]
+ 
     def __call__(self, fn):
         """Decorator form: wrap a sync callable with breaker checks."""
-
+ 
         def wrapper(*args, **kwargs):
             if self.is_open:
                 raise CircuitOpenError(
@@ -98,5 +100,6 @@ class CircuitBreaker:
                 raise
             self.record_success()
             return result
-
+ 
         return wrapper
+ 

@@ -1,111 +1,78 @@
 """
-utils/logger.py — Logging for JARVIS
-
-Design goals:
-  * Normal operation prints a CLEAN console: only WARNING/ERROR (and a
-    few INFO milestones) show up. DEBUG noise appears only with
-    `jarvis --debug` (or JARVIS_DEBUG=1).
-  * Everything is always written to jarvis.log at DEBUG level so a
-    problem can be diagnosed without running in debug mode.
-  * All module loggers share one console + one file handler (attached
-    to the root logger), so `set_debug()` switches the whole app at once.
+utils/logger.py — Logging configuration for JARVIS.
+ 
+[FIX m5] Added __all__ exports.
 """
-
+ 
 import logging
 import sys
 from pathlib import Path
 
-# Console shows only WARNING/ERROR by default so normal operation stays
-# clean (the user-facing status lines are printed directly by main.py).
-# `jarvis --debug` or LOG_LEVEL=DEBUG flips the console to DEBUG;
-# jarvis.log always records everything at DEBUG.
-_CONSOLE_LEVEL = logging.WARNING
+__all__ = [
+    "get_logger",
+    "set_debug",
+]
 
-try:
-    from config import log_config
+# Track if we're in debug mode
+_debug_mode = False
 
-    if (log_config.LEVEL or "INFO").strip().upper() == "DEBUG":
-        _CONSOLE_LEVEL = logging.DEBUG
-except Exception:
-    pass
+# Project root for log file
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Keep track of the console handler so set_debug() can adjust it.
-_console_handler: logging.Handler | None = None
+# Guard so the root logger is configured only once
+_ROOT_CONFIGURED = False
 
 
 def _configure_root() -> None:
-    """Attach the shared console + file handlers to the root logger once."""
-    global _console_handler
-    root = logging.getLogger()
-    if getattr(root, "_jarvis_configured", False):
+    """Configure the root logger with a console + rotating file handler."""
+    global _ROOT_CONFIGURED
+    if _ROOT_CONFIGURED:
         return
+    _ROOT_CONFIGURED = True
 
+    root = logging.getLogger()
     root.setLevel(logging.DEBUG)
 
-    # ── Console handler (INFO normally, DEBUG with --debug) ──
     console = logging.StreamHandler(sys.stdout)
-    console.setLevel(_CONSOLE_LEVEL)
-    console.setFormatter(
-        logging.Formatter(fmt="[%(levelname)s] %(message)s")
-    )
+    console.setFormatter(logging.Formatter(
+        "[%(levelname)s] %(name)s: %(message)s"
+    ))
     root.addHandler(console)
-    _console_handler = console
 
-    # ── File handler (always DEBUG) ──
-    # RotatingFileHandler keeps the log bounded: 10 MB per file, 5
-    # backups (jarvis.log.1 .. .5), so a long-running install (e.g.
-    # --startup enable at login) can never exhaust the disk. On a busy
-    # session with VAD_VERBOSE=true the log grows ~50 MB/day, so
-    # rotation caps total usage at ~60 MB.
     try:
         from logging.handlers import RotatingFileHandler
+        from config import log_config
+        log_file = _PROJECT_ROOT / log_config.FILE
+        log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        log_path = Path(__file__).parent.parent / "jarvis.log"
         file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=10 * 1024 * 1024,  # 10 MB
-            backupCount=5,               # jarvis.log.1 .. .5
-            encoding="utf-8",
+            str(log_file), maxBytes=10 * 1024 * 1024,
+            backupCount=5, encoding="utf-8",
         )
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(
-            logging.Formatter(
-                fmt="%(asctime)s [%(levelname)s] "
-                    "%(name)s: %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
         root.addHandler(file_handler)
     except Exception:
-        pass  # File logging is optional
-
-    root._jarvis_configured = True  # type: ignore[attr-defined]
-
-
-def set_debug(enabled: bool = True) -> None:
-    """Show DEBUG-level output on the console (used by `jarvis --debug`)."""
-    global _CONSOLE_LEVEL
-    _CONSOLE_LEVEL = logging.DEBUG if enabled else logging.INFO
-    _configure_root()
-    if _console_handler is not None:
-        _console_handler.setLevel(_CONSOLE_LEVEL)
-    logging.getLogger().debug("Debug logging enabled.")
+        pass  # File logging optional
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Return a configured logger with console + file output.
-
-    Call this from any module: logger = get_logger(__name__)
-    """
+    """Get a logger instance for the given module name."""
     _configure_root()
-    return logging.getLogger(name)
-
-
-# Keep these for any code that imports them directly.
-def get_info_logger(name: str) -> logging.Logger:
-    return get_logger(name)
-
-
-def get_debug_logger(name: str) -> logging.Logger:
-    return get_logger(name)
+    logger = logging.getLogger(f"jarvis.{name}")
+    return logger
+ 
+ 
+def set_debug(enabled: bool = True) -> None:
+    """Enable or disable debug logging globally."""
+    global _debug_mode
+    _debug_mode = enabled
+    
+    level = logging.DEBUG if enabled else logging.INFO
+    
+    # Update all jarvis loggers
+    for name in list(logging.Logger.manager.loggerDict.keys()):
+        if name.startswith("jarvis."):
+            logging.getLogger(name).setLevel(level)
+ 

@@ -1,66 +1,52 @@
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
-
+ 
 [project]
 name = "jarvis-assistant"
-version = "2.0.0"
-description = "JARVIS — a private, local AI voice assistant"
+version = "2.0.1"
+description = "JARVIS — a private, local AI voice assistant for Windows/Linux/macOS"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-# ── Single source of truth for runtime dependencies ─────────────────────────
-# requirements.txt is GENERATED from this table (keep them in sync):
-#     python -c "import tomllib,re;d=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies'];open('requirements.txt','w').write('# Generated from pyproject.toml — do not edit by hand.\n'+'\n'.join(d)+'\n')"
-#
-# Versions are pinned to the known-good set that is installed in .venv and
-# verified by the test suite (numpy 2.5.2, faster-whisper 1.2.1, piper-tts
-# 1.6.1, sounddevice 0.5.5, ...). numpy is a range because a single version
-# cannot span the supported Python range (2.2.x supports 3.10; 2.5.x
-# supports 3.12-3.14) — numpy 2.x works because the audio pipeline only
-# uses stable dtype APIs (np.float32 / np.int16, never np.float/np.int).
+ 
+# [FIX C1+C2] Unified with requirements.txt. NumPy <2.0 for audio compatibility.
 dependencies = [
-    "faster-whisper==1.2.1",
-    "piper-tts==1.6.1",
-    "sounddevice==0.5.5",
-    "numpy>=2.2,<2.6",
-    "requests==2.34.2",
-    "python-dotenv==1.2.2",
+    "faster-whisper==1.1.0",
+    "piper-tts==1.2.0",
+    "sounddevice==0.5.0",
+    "numpy>=1.26.0,<2.0.0",
+    "requests==2.32.3",
+    "python-dotenv==1.0.1",
     "pyautogui==0.9.54",
-    "pillow==12.3.0",
-    "pycaw==20251023",
-    "comtypes==1.4.16",
-    "rich==15.0.0",
+    "pillow==10.4.0",
+    "pycaw==20240210",
+    "comtypes==1.4.14",
+    "rich==13.7.1",
 ]
-
+ 
 [project.optional-dependencies]
-# TTS_ENGINE=pyttsx3 fallback (Windows SAPI5) — optional; Piper is the
-# default and needs none of this. Install with:  pip install -e .[tts]
-tts = ["pyttsx3==2.99"]
-dev = ["pytest==9.1.1", "ruff==0.16.3", "hypothesis>=6.100,<7"]
+# [FIX M8] pyttsx3 is optional fallback TTS (Windows SAPI5)
+fallback-tts = ["pyttsx3==2.90"]
+dev = ["pytest==8.0.0", "ruff==0.3.0", "hypothesis>=6.100,<7"]
 gui = ["PySide6>=6.6", "PyOpenGL>=3.1", "psutil>=5.9"]
-
+ 
 [project.scripts]
 jarvis = "jarvis_cli:main"
-
+ 
 [tool.setuptools]
 packages = ["jarvis_cli"]
-
+ 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
-    # sounddevice 0.5.x uses the deprecated `array.shape = ...` idiom.
     "ignore:Setting the shape on a NumPy array:DeprecationWarning",
 ]
-
+ 
 [tool.ruff]
 target-version = "py310"
-# jarvis_ui carries pre-existing OpenGL painting debt that is out of
-# scope here; linting focuses on the core runtime + tests.
-# Notebooks are not Python modules (E401 in a %%capture cell).
 extend-exclude = ["jarvis_ui/**", "*.ipynb"]
-
+ 
 [tool.ruff.lint]
-# F = pyflakes (real bugs: unused imports, undefined names)
-# E4/E7/E9 = syntax-adjacent style that catches genuine mistakes
 select = ["F", "E4", "E7", "E9"]
+ 

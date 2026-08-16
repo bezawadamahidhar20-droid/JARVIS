@@ -196,7 +196,7 @@ def test_speak_blocking_unblocked_by_stop():
 
 def test_generation_increments_on_stop():
     tts = TTSEngine(engine="piper", backend=FakeBackend())
-    gen0 = tts._current_generation()
+    gen0 = tts._generation
     tts.stop()
-    assert tts._current_generation() == gen0 + 1
+    assert tts._generation == gen0 + 1
     tts.stop()

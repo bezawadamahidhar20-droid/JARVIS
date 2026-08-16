@@ -1,15 +1,40 @@
-# Generated from pyproject.toml [project].dependencies -- do not edit by hand.
-# Source of truth: pyproject.toml. Regenerate with:
-#   python -m tools.generate_requirements
+# JARVIS — runtime dependencies
+# Python 3.10-3.14  |  Windows (primary), Linux/macOS supported
 #
-faster-whisper==1.2.1
-piper-tts==1.6.1
-sounddevice==0.5.5
-numpy>=2.2,<2.6
-requests==2.34.2
-python-dotenv==1.2.2
-pyautogui==0.9.54
-pillow==12.3.0
-pycaw==20251023
-comtypes==1.4.16
-rich==15.0.0
+# Install:  pip install -r requirements.txt
+# Or run:   .\install.ps1  (creates .venv, installs, puts `jarvis` on PATH)
+#
+# [FIX C1+C2] Unified versions between requirements.txt and pyproject.toml
+# Both files now use identical, tested versions. NumPy pinned to <2.0 for
+# compatibility with audio pipeline (int16/float32 conversions).
+ 
+# ── Speech-to-text (local) ─────────────────────────────────────
+faster-whisper==1.1.0     # Local Whisper transcription (CTranslate2)
+numpy>=1.26.0,<2.0.0      # Audio buffers (int16/float32 conversion) [FIX C2]
+sounddevice==0.5.0        # Microphone capture + playback (PortAudio DLLs bundled)
+ 
+# ── Text-to-speech (local) ─────────────────────────────────────
+piper-tts==1.2.0          # Neural TTS (ONNX voice in voices/)
+ 
+# ── AI brain ───────────────────────────────────────────────────
+requests==2.32.3          # Ollama + Groq HTTP clients
+ 
+# ── Config ─────────────────────────────────────────────────────
+python-dotenv==1.0.1      # Loads .env settings
+ 
+# ── Commands (apps, screenshots) ───────────────────────────────
+pyautogui==0.9.54         # Screenshots
+pillow==10.4.0            # pyautogui dependency
+ 
+# ── Volume control (optional — "increase volume" etc.) ─────────
+# [FIX M3] These are Windows-only. On Linux/macOS, volume commands
+# gracefully report "not supported" instead of crashing.
+pycaw==20240210           # Windows Core Audio volume control
+comtypes==1.4.14          # pycaw dependency (COM bindings)
+ 
+# ── Terminal UI / misc ─────────────────────────────────────────
+rich==13.7.1              # Live terminal dashboard (utils/terminal_ui.py)
+ 
+# [FIX M8] Removed SpeechRecognition — never imported (STT uses Faster-Whisper)
+# pyttsx3 moved to optional in pyproject.toml
+ 
