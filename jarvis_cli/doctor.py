@@ -97,21 +97,71 @@ def _check_whisper():
 
 
 def _check_piper():
-    import piper  # noqa: F401
+    """Piper package + executable availability, with version detection."""
+    from importlib.metadata import PackageNotFoundError, version
 
-    return True, "piper-tts installed"
+    try:
+        ver = version("piper-tts")
+    except PackageNotFoundError:
+        return False, "piper-tts package not installed"
+    except Exception as e:
+        return False, f"piper-tts version detection failed: {e}"
+
+    detail = f"piper-tts {ver} installed"
+    try:
+        import piper  # noqa: F401 — import sanity
+    except Exception as e:
+        return False, f"piper-tts {ver} installed but fails to import: {e}"
+
+    # Optional standalone executable (some installs ship `piper`/`piper.exe`).
+    import shutil
+
+    exe = shutil.which("piper")
+    if exe is None and os_name() == "nt":
+        exe = shutil.which("piper.exe")
+    if exe:
+        detail += f"; executable: {exe}"
+    else:
+        detail += "; no standalone piper executable on PATH (OK — the Python API is used)"
+    return True, detail
+
+
+def os_name() -> str:
+    """os.name without importing os at module level in tests."""
+    import os
+
+    return os.name
 
 
 def _check_voice_model():
+    """Voice ONNX model (+ its .onnx.json config) availability."""
     from config import tts_config
 
     if tts_config.VOICE_PATH:
         path = Path(tts_config.VOICE_PATH)
-    else:
-        path = PROJECT_ROOT / "voices" / f"{tts_config.VOICE}.onnx"
-    if path.is_file():
-        return True, str(path)
-    return False, f"{path} not found"
+        missing = [str(path)]
+        if path.is_file():
+            return True, str(path)
+        return False, (
+            f"TTS_VOICE_PATH points to a missing file: {path} — "
+            "fix the path in .env (or download the voice with "
+            "`python -m piper.download_voices`)."
+        )
+
+    name = tts_config.VOICE
+    onnx = PROJECT_ROOT / "voices" / f"{name}.onnx"
+    cfg = PROJECT_ROOT / "voices" / f"{name}.onnx.json"
+    missing = []
+    if not onnx.is_file():
+        missing.append(str(onnx))
+    if not cfg.is_file():
+        missing.append(str(cfg))
+    if missing:
+        return False, (
+            "missing: " + "; ".join(missing) + " — download with: "
+            f"python -m piper.download_voices {name}"
+        )
+    return True, str(onnx)
 
 
 def _check_ollama():
@@ -184,26 +234,18 @@ def _check_dependencies():
 
 
 def _check_config():
+    """Validate the loaded configuration via config.validate_config()."""
     import config  # noqa: F401
 
-    from config import (
-        ollama_config,
-        tts_config,
-        whisper_config,
-        vad_config,
-    )
+    from config import validate_config
 
-    problems = []
-    if not ollama_config.BASE_URL.startswith(("http://", "https://")):
-        problems.append("OLLAMA_BASE_URL invalid")
-    if not whisper_config.MODEL:
-        problems.append("WHISPER_MODEL empty")
-    if tts_config.ENGINE not in ("piper", "pyttsx3"):
-        problems.append(f"TTS_ENGINE '{tts_config.ENGINE}' unknown")
-    if vad_config.SILENCE_DURATION <= 0:
-        problems.append("VAD_SILENCE_DURATION must be > 0")
+    problems = validate_config()
     if problems:
-        return False, "; ".join(problems)
+        lines = []
+        for p in problems:
+            mark = "ERROR" if p["fatal"] else "WARN"
+            lines.append(f"{p['setting']}: {p['message']} ({mark})")
+        return False, "; ".join(lines)
     detail = f".env at {PROJECT_ROOT / '.env'}"
     if not (PROJECT_ROOT / ".env").is_file():
         detail = "no .env (using built-in defaults)"

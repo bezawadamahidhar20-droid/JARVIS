@@ -18,6 +18,9 @@ Architecture:
         ├── SerperProvider   — POST google.serper.dev/search
         └── BraveProvider    — GET api.search.brave.com/res/v1/web/search
 
+Search results are cached in memory (SearchCache) so identical queries
+within SEARCH_CACHE_TTL seconds skip the external API entirely.
+
 Design rules:
   * No API key is ever hardcoded — everything comes from config.py.
   * A provider that is not configured reports is_configured() == False
@@ -31,6 +34,7 @@ Design rules:
 """
 
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -48,10 +52,22 @@ try:
     SEARCH_PROVIDER = search_config.PROVIDER
     SEARCH_API_KEY = search_config.API_KEY
     SEARCH_MAX_RESULTS = search_config.MAX_RESULTS
+    SEARCH_CACHE_TTL = search_config.CACHE_TTL
+    SEARCH_CACHE_MAX_ENTRIES = search_config.CACHE_MAX_ENTRIES
 except Exception:
     SEARCH_PROVIDER = "tavily"
     SEARCH_API_KEY = ""
     SEARCH_MAX_RESULTS = 5
+    SEARCH_CACHE_TTL = 300
+    SEARCH_CACHE_MAX_ENTRIES = 50
+
+# Queries that look personal/private are never cached.
+_SENSITIVE_QUERY_RE = re.compile(
+    r"\b(password|passwords|passwd|credit card|debit card|ssn|"
+    r"social security|bank account|account number|pin|otp|api key|"
+    r"secret|private key|my address|my phone|my email)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -82,6 +98,71 @@ def _domain_of(url: str) -> str:
         return ""
 
 
+# ── Result cache ──────────────────────────────────────────────
+
+class SearchCache:
+    """
+    Tiny in-memory cache for identical search queries.
+
+    * Entries expire after ``ttl`` seconds (0 disables the cache).
+    * The cache is bounded: the oldest entry is evicted when
+      ``max_entries`` is exceeded.
+    * Personal-looking queries are never cached.
+    * All failures are handled by the caller — this class never raises.
+    """
+
+    def __init__(self, ttl: float | None = None, max_entries: int | None = None):
+        self.ttl = float(ttl if ttl is not None else SEARCH_CACHE_TTL)
+        self.max_entries = int(
+            max_entries if max_entries is not None else SEARCH_CACHE_MAX_ENTRIES
+        )
+        # key (query, max_results) -> (monotonic timestamp, results)
+        self._data: dict[tuple[str, int], tuple[float, list]] = {}
+
+    @staticmethod
+    def _key(query: str, max_results: int) -> tuple[str, int]:
+        return ((query or "").strip().lower(), int(max_results))
+
+    @staticmethod
+    def _is_sensitive(query: str) -> bool:
+        return bool(_SENSITIVE_QUERY_RE.search(query or ""))
+
+    def get(self, query: str, max_results: int = SEARCH_MAX_RESULTS):
+        """Return cached results for *query*, or None on miss/expiry."""
+        if self.ttl <= 0 or self._is_sensitive(query):
+            return None
+        key = self._key(query, max_results)
+        item = self._data.get(key)
+        if item is None:
+            return None
+        stored_at, results = item
+        if time.monotonic() - stored_at > self.ttl:
+            self._data.pop(key, None)
+            return None
+        return results
+
+    def put(self, query: str, results: list, max_results: int = SEARCH_MAX_RESULTS) -> None:
+        """Cache *results* for *query* (bounded, never raises)."""
+        if self.ttl <= 0 or self._is_sensitive(query):
+            return
+        try:
+            key = self._key(query, max_results)
+            self._data[key] = (time.monotonic(), list(results))
+            # Bounded growth: evict the oldest entry when over capacity.
+            while len(self._data) > max(1, self.max_entries):
+                oldest = min(self._data, key=lambda k: self._data[k][0])
+                del self._data[oldest]
+        except Exception as e:
+            logger.warning(f"Search cache write failed: {e}")
+
+    def clear(self) -> None:
+        """Drop all cached entries."""
+        self._data.clear()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 # ── Abstract provider ─────────────────────────────────────────
 
 class WebSearchProvider(ABC):
@@ -102,7 +183,35 @@ class WebSearchProvider(ABC):
         """Run *query* and return normalized results.
 
         Returns [] on any failure — never raises, never invents data.
+        Implementations call ``self._run_cached`` so repeated queries
+        skip the external API within the TTL.
         """
+
+    def _run_cached(self, query: str, max_results, fetch) -> list[SearchResult]:
+        """Serve *query* from the shared cache or run *fetch* and cache.
+
+        Only successful results are cached; sensitive queries bypass the
+        cache entirely. Cache failures degrade to a live search.
+        """
+        limit = max_results or self.max_results
+        try:
+            hit = _SEARCH_CACHE.get(query, limit)
+            if hit is not None:
+                logger.debug(f"Search cache hit for {query!r}.")
+                return hit
+        except Exception as e:
+            logger.warning(f"Search cache lookup failed: {e}")
+        try:
+            results = fetch()
+        except Exception as e:
+            logger.error(f"Search fetch failed: {e}")
+            return []
+        if results:
+            try:
+                _SEARCH_CACHE.put(query, results, limit)
+            except Exception as e:
+                logger.warning(f"Search cache store failed: {e}")
+        return results
 
     # Reachability statuses returned by is_reachable().
     REACH_OK = "ok"            # API answered 200 — key works
@@ -147,7 +256,8 @@ class TavilyProvider(WebSearchProvider):
         if not self.is_configured():
             logger.warning("Tavily not configured (missing SEARCH_API_KEY).")
             return []
-        try:
+
+        def _fetch() -> list[SearchResult]:
             resp = requests.post(
                 self.ENDPOINT,
                 json={
@@ -169,6 +279,9 @@ class TavilyProvider(WebSearchProvider):
                 for item in data.get("results", [])
                 if isinstance(item, dict)
             ]
+
+        try:
+            return self._run_cached(query, max_results, _fetch)
         except Exception as e:
             logger.error(f"Tavily search failed: {e}")
             return []
@@ -208,7 +321,8 @@ class SerperProvider(WebSearchProvider):
         if not self.is_configured():
             logger.warning("Serper not configured (missing SEARCH_API_KEY).")
             return []
-        try:
+
+        def _fetch() -> list[SearchResult]:
             resp = requests.post(
                 self.ENDPOINT,
                 headers=self._headers(),
@@ -226,6 +340,9 @@ class SerperProvider(WebSearchProvider):
                 for item in data.get("organic", [])
                 if isinstance(item, dict)
             ]
+
+        try:
+            return self._run_cached(query, max_results, _fetch)
         except Exception as e:
             logger.error(f"Serper search failed: {e}")
             return []
@@ -258,7 +375,8 @@ class BraveProvider(WebSearchProvider):
         if not self.is_configured():
             logger.warning("Brave not configured (missing SEARCH_API_KEY).")
             return []
-        try:
+
+        def _fetch() -> list[SearchResult]:
             resp = requests.get(
                 self.ENDPOINT,
                 headers={"X-Subscription-Token": self.api_key},
@@ -276,6 +394,9 @@ class BraveProvider(WebSearchProvider):
                 for item in data.get("web", {}).get("results", [])
                 if isinstance(item, dict)
             ]
+
+        try:
+            return self._run_cached(query, max_results, _fetch)
         except Exception as e:
             logger.error(f"Brave search failed: {e}")
             return []
@@ -302,6 +423,15 @@ _PROVIDERS: dict[str, type[WebSearchProvider]] = {
     "serper": SerperProvider,
     "brave": BraveProvider,
 }
+
+
+# Shared cache used by every provider instance.
+_SEARCH_CACHE = SearchCache()
+
+
+def clear_search_cache() -> None:
+    """Drop all cached search results (used by tests)."""
+    _SEARCH_CACHE.clear()
 
 
 def create_search_provider(name: str | None = None) -> WebSearchProvider | None:

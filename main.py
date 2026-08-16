@@ -37,7 +37,7 @@ from engine.tts import TTSEngine
 # ── Brain ─────────────────────────────────────────────────────
 from brain.memory import ConversationMemory
 from brain.llm import create_provider
-from brain.router import IntentRouter, Intent
+from brain.router import IntentRouter, Intent, validate_input
 from brain.search import (
     build_search_query,
     filter_and_rank,
@@ -45,7 +45,7 @@ from brain.search import (
 )
 
 # ── Commands ──────────────────────────────────────────────────
-from commands.registry import CommandRegistry
+from commands.registry import CommandRegistry, PendingConfirmation
 
 # ── Utils ─────────────────────────────────────────────────────
 from utils.logger import get_logger, set_debug
@@ -64,6 +64,18 @@ ERROR_AI_FAILED = (
 ERROR_MEMORY_CLEARED = (
     "Memory cleared. I have forgotten our previous "
     "conversation and we are starting fresh."
+)
+ERROR_INPUT_TOO_LONG = (
+    "I'm sorry, that message was too long. "
+    f"Please keep your request under "
+    f"{jarvis_config.MAX_INPUT_CHARS} characters."
+)
+ERROR_CONFIRMATION_TIMED_OUT = (
+    f"I'm sorry {jarvis_config.OWNER}, that action timed out "
+    "and has been cancelled."
+)
+ERROR_COMMAND_FAILED = (
+    "Sorry, I couldn't complete that command."
 )
 # Spoken when a current-information question cannot be verified. JARVIS
 # NEVER falls back to a potentially stale LLM answer for these.
@@ -119,8 +131,13 @@ class JARVIS:
         self.stt = components.get("stt") or STTEngine(self.mic)
         self.tts = components.get("tts") or TTSEngine(rate=tts_config.RATE)
 
-        # AI brain (provider-agnostic)
-        self.memory = components.get("memory") or ConversationMemory()
+        # AI brain (provider-agnostic). NOTE: `or` would be wrong here —
+        # an empty ConversationMemory is falsy (it defines __len__).
+        memory_component = components.get("memory")
+        self.memory = (
+            memory_component if memory_component is not None
+            else ConversationMemory()
+        )
         self.provider = components.get("provider")
         if self.provider is None:
             try:
@@ -148,10 +165,21 @@ class JARVIS:
         self.commands = components.get("commands") or CommandRegistry()
 
         # Pending CONFIRM-permission command (shutdown/restart/sleep).
-        # Tuple of (CommandResult, original_text); None when idle.
-        self._pending: tuple | None = None
+        # PendingConfirmation enforces an expiry window so a stale "yes"
+        # can never execute a command; None when idle.
+        self._pending: PendingConfirmation | None = None
 
         self.running = False
+
+        # Optional rich terminal dashboard (issue: polished real-time
+        # interface). Only created when rich is importable.
+        self.ui = None
+        try:
+            from utils.terminal_ui import TerminalUI
+
+            self.ui = TerminalUI(debug=debug)
+        except Exception as e:
+            logger.debug(f"Terminal dashboard unavailable: {e}")
         self.ollama_ok = self._check_provider()
         self._timings: list[dict] = []
         # Warm-up coordination: the background load must not overlap
@@ -237,15 +265,18 @@ class JARVIS:
 
         if self.mic.is_available():
             logger.info(f"Microphone: {self.mic.describe()}")
+            self._ui_component("Microphone", "ok", self.mic.describe())
         else:
             logger.warning(
                 "Microphone unavailable — commands and text mode "
                 "still work."
             )
+            self._ui_component("Microphone", "off", "unavailable")
 
         if self.ollama_ok:
             logger.info(f"AI engine: {self.provider.describe()}")
             print("[+] AI engine ready")
+            self._ui_component("Ollama", "ok", self.provider.describe())
         else:
             print(
                 "[!] Ollama unavailable — local command mode "
@@ -255,24 +286,43 @@ class JARVIS:
                 "Ollama not reachable; conversational answers will "
                 "be unavailable until it starts."
             )
+            self._ui_component("Ollama", "off", "not reachable")
+
+    @staticmethod
+    def _describe(obj, default: str = "ready") -> str:
+        """Call ``obj.describe()`` defensively (fakes may lack it)."""
+        fn = getattr(obj, "describe", None)
+        if fn is None:
+            return default
+        try:
+            return str(fn())
+        except Exception:
+            return default
 
     def load_models(self) -> None:
         """Load Whisper + Piper voice models once at startup."""
         if self.stt.load():
             print("[+] Speech recognition ready")
+            self._ui_component("Whisper", "ok", self._describe(self.stt))
         else:
             print(
                 "[!] Speech recognition unavailable — text mode "
                 "and commands still work."
             )
+            self._ui_component("Whisper", "off", "unavailable")
 
         if self.tts.load():
             print("[+] Voice engine ready")
+            self._ui_component(
+                "TTS", "ok",
+                getattr(self.tts, "engine_name", "tts"),
+            )
         else:
             print(
                 "[!] Voice engine unavailable — replies will be "
                 "printed to the console instead."
             )
+            self._ui_component("TTS", "off", "unavailable")
 
     def initialize_audio(self) -> None:
         """Calibrate the adaptive VAD against ambient noise."""
@@ -284,13 +334,34 @@ class JARVIS:
     def initialize_router(self) -> None:
         """Wire up routing + commands."""
         print("[+] Command router ready")
+        self._ui_component("Router", "ok", "ready")
         logger.debug("Router + command registry ready.")
+
+    # ── Terminal dashboard helpers ────────────────────────────
+
+    def _ui_component(self, name: str, status: str, detail: str) -> None:
+        """Update a component row on the terminal dashboard (no-op when
+        the dashboard is not active)."""
+        if self.ui is not None:
+            try:
+                self.ui.set_component(name, status, detail)
+            except Exception:
+                pass
+
+    def _ui_state(self, state: str, meta: str = "") -> None:
+        """Update the dashboard state indicator (no-op when inactive)."""
+        if self.ui is not None:
+            try:
+                self.ui.set_state(state, meta)
+            except Exception:
+                pass
 
     # ── Speech helpers ────────────────────────────────────────
 
     def speak(self, text: str) -> None:
         """Speak text via TTS (non-blocking)."""
         if text and text.strip():
+            self._ui_state("speaking")
             self.tts.speak(text)
 
     def speak_blocking(self, text: str) -> None:
@@ -509,9 +580,9 @@ class JARVIS:
         Execute a system command.
 
         SAFE commands run immediately. CONFIRM commands (shutdown /
-        restart / sleep) only store the pending action and ask the
+        restart / sleep) only store a PendingConfirmation and ask the
         user to confirm — they execute in process_input() after a
-        clear "yes".
+        clear "yes", and expire after CONFIRMATION_TIMEOUT seconds.
         """
         result = self.commands.execute_with_meta(user_input)
         if result is None:
@@ -521,7 +592,7 @@ class JARVIS:
             )
             return
         if result.needs_confirmation:
-            self._pending = (result, user_input)
+            self._pending = PendingConfirmation(result, user_input)
             self.speak(result.confirm_prompt)
             return
         if result.response:
@@ -535,29 +606,56 @@ class JARVIS:
             False = exit JARVIS
             True  = continue running
         """
-        if not user_input or not user_input.strip():
+        # Validate + normalize up front: empty/whitespace input is
+        # ignored, and over-long input is rejected politely — it never
+        # reaches a command handler or the AI provider.
+        validated = validate_input(user_input)
+        if not validated:
+            if user_input and len(user_input.strip()) > jarvis_config.MAX_INPUT_CHARS:
+                logger.warning("Over-long input rejected.")
+                self.speak(ERROR_INPUT_TOO_LONG)
             return True
+        user_input = validated
 
         print(f"\n[You] {user_input}")
+        if self.ui is not None:
+            try:
+                self.ui.add_message("user", user_input)
+            except Exception:
+                pass
 
         # A CONFIRM command (shutdown/restart/sleep) is pending — the
         # next input must answer it before anything else is processed.
         if self._pending is not None:
-            decision = self._confirm_decision(user_input)
-            if decision == "yes":
-                result, original = self._pending
+            if self._pending.is_expired:
+                # Stale confirmation: cancel it, never execute.
+                logger.info("Pending confirmation expired; cancelling.")
                 self._pending = None
-                self.speak(result.execute(original))
-                return True
-            if decision == "no":
+                self.speak(ERROR_CONFIRMATION_TIMED_OUT)
+            else:
+                decision = self._confirm_decision(user_input)
+                if decision == "yes":
+                    # take() claims the action exactly once — a second
+                    # "yes" cannot re-execute it.
+                    claimed = self._pending.take()
+                    self._pending = None
+                    if claimed is not None:
+                        result, original = claimed
+                        try:
+                            self.speak(result.execute(original))
+                        except Exception as e:
+                            logger.error(f"Confirmed command failed: {e}")
+                            self.speak(ERROR_COMMAND_FAILED)
+                    return True
+                if decision == "no":
+                    self._pending = None
+                    self.speak(
+                        f"Understood, {jarvis_config.OWNER}. I won't."
+                    )
+                    return True
+                # Not a clear yes/no — drop the pending action and treat
+                # this as a fresh request.
                 self._pending = None
-                self.speak(
-                    f"Understood, {jarvis_config.OWNER}. I won't."
-                )
-                return True
-            # Not a clear yes/no — drop the pending action and treat
-            # this as a fresh request.
-            self._pending = None
 
         # Route the input to correct handler
         intent, cleaned = self.router.route(user_input)
@@ -579,6 +677,7 @@ class JARVIS:
             self.speak(ERROR_MEMORY_CLEARED)
 
         elif intent == Intent.COMMAND:
+            self._ui_state("thinking", "executing command")
             self.handle_command(cleaned)
 
         elif intent == Intent.STOP_SPEECH:
@@ -588,12 +687,15 @@ class JARVIS:
         elif intent == Intent.WEB_SEARCH:
             # Current-information question — answer from fresh search
             # results, never from the model's stale training data.
+            self._ui_state("thinking", "searching the web")
             self.handle_web_search(cleaned or user_input)
 
         else:
             # AI_QUESTION or UNKNOWN — send to the AI provider.
+            self._ui_state("thinking", "consulting the brain")
             self.handle_ai_question(user_input)
 
+        self._ui_state("idle")
         return True
 
     # ── Benchmarking ──────────────────────────────────────────
@@ -645,6 +747,17 @@ class JARVIS:
             print("  Say 'goodbye' to exit.")
         print("=============================================\n")
 
+        # Live terminal dashboard: colored, animated, state-aware.
+        if self.ui is not None:
+            try:
+                self.ui.start()
+                recorder = getattr(self.stt, "vad", None)
+                if recorder is not None:
+                    self.ui.set_recorder(recorder)
+            except Exception as e:
+                logger.warning(f"Terminal dashboard failed to start: {e}")
+                self.ui = None
+
         consecutive_failures = 0
         MAX_FAILURES = 5
 
@@ -662,6 +775,7 @@ class JARVIS:
                     self.tts.wait()
                     turn["speak"] = time.perf_counter() - t0
 
+                    self._ui_state("listening")
                     t0 = time.perf_counter()
                     user_input = self.listen()
                     turn["listen"] = time.perf_counter() - t0
@@ -720,6 +834,12 @@ class JARVIS:
             self.stt.unload()
         except Exception:
             pass
+        if self.ui is not None:
+            try:
+                self.ui.stop()
+            except Exception:
+                pass
+            self.ui = None
         logger.info("JARVIS stopped.")
         print("\n[*] JARVIS offline. Goodbye.")
         if self.benchmark:
@@ -736,12 +856,37 @@ class JARVIS:
             self.shutdown()
 
 
+def validate_configuration() -> list:
+    """Audit config and log every problem. Returns the fatal ones."""
+    from config import validate_config
+
+    problems = validate_config()
+    fatal = []
+    for p in problems:
+        if p["fatal"]:
+            logger.error(f"Config error — {p['setting']}: {p['message']}")
+            fatal.append(p)
+        else:
+            logger.warning(f"Config warning — {p['setting']}: {p['message']}")
+    return fatal
+
+
 def run_assistant(
     text_mode: bool = False,
     debug: bool = False,
     benchmark: bool = False,
 ) -> int:
     """Entry point used by both `python main.py` and `jarvis`."""
+    # Fail early on genuinely invalid required configuration (missing
+    # .env values use safe defaults, so only real mistakes surface).
+    fatal = validate_configuration()
+    if fatal:
+        print("\nJARVIS cannot start — invalid configuration:")
+        for p in fatal:
+            print(f"  - {p['setting']}: {p['message']}")
+        print("Fix the values in .env (see .env.example) and try again.\n")
+        return 1
+
     jarvis = JARVIS(
         text_mode=text_mode,
         debug=debug,

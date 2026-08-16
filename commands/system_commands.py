@@ -10,11 +10,11 @@ here ever evaluates user text as a command — the target is resolved against
 the safe lookup tables below (WEBSITES / APPS / FOLDERS).
 """
 
+import difflib
 import os
 import re
 import shutil
 import subprocess
-import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -121,8 +121,31 @@ APPS: dict[str, str] = {
     "powerpoint": "powerpnt.exe",
     "vscode": "code.exe",
     "visual studio code": "code.exe",
+    "vs code": "code.exe",
     "photos": "ms-photos:",
 }
+
+# ── Fuzzy matching (speech-recognition misspellings) ────────────────────────
+# "open chrom" should resolve to Chrome; "open youtbe" to YouTube. We only
+# ever match against the TRUSTED registries below (APPS / WEBSITES) with a
+# high similarity cutoff — an arbitrary string is never executed.
+_FUZZY_CUTOFF = 0.8
+_FUZZY_MIN_LEN = 3
+
+
+def fuzzy_match_target(target: str, registry: dict, cutoff: float = _FUZZY_CUTOFF) -> str | None:
+    """Return the best trusted key for a possibly misspelled *target*.
+
+    Only high-similarity matches against a known registry entry are
+    returned — anything else is None (caller politely declines).
+    """
+    t = (target or "").strip().lower()
+    if len(t) < _FUZZY_MIN_LEN:
+        return None
+    if not registry:
+        return None
+    matches = difflib.get_close_matches(t, registry.keys(), n=1, cutoff=cutoff)
+    return matches[0] if matches else None
 
 # Spoken name -> Windows known-folder key (resolved with SHGetKnownFolderPath).
 FOLDERS: dict[str, str] = {
@@ -375,6 +398,16 @@ class SystemCommands:
         if target in APPS:
             return self.open_app(APPS[target], target)
 
+        # Speech recognition sometimes drops/transposes letters
+        # ("open chrom" -> Chrome, "open youtbe" -> YouTube). Match only
+        # against the trusted registries; never an arbitrary command.
+        fuzzy = fuzzy_match_target(target, WEBSITES)
+        if fuzzy:
+            return self.open_website(WEBSITES[fuzzy])
+        fuzzy = fuzzy_match_target(target, APPS)
+        if fuzzy:
+            return self.open_app(APPS[fuzzy], fuzzy)
+
         # Folders — strip "my"/"the" prefix and "folder" suffix first.
         key = re.sub(r"^(my|the)\s+", "", target)
         key = re.sub(r"\s+folder(s)?$", "", key).strip()
@@ -588,15 +621,15 @@ class SystemCommands:
         if re.search(r"\bshut\s*down\b|\bpower\s*off\b", t):
             if _run(["shutdown", "/s", "/t", "5"]):
                 return f"Shutting down in 5 seconds, {OWNER}."
-            return f"Sorry, I couldn't shut down the computer."
+            return "Sorry, I couldn't shut down the computer."
         if re.search(r"\brestart\b|\breboot\b", t):
             if _run(["shutdown", "/r", "/t", "5"]):
                 return f"Restarting in 5 seconds, {OWNER}."
-            return f"Sorry, I couldn't restart the computer."
+            return "Sorry, I couldn't restart the computer."
         if re.search(r"\bsleep\b|\bhibernate\b", t):
             if _run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]):
                 return f"Putting the system to sleep, {OWNER}."
-            return f"Sorry, I couldn't put the system to sleep."
+            return "Sorry, I couldn't put the system to sleep."
         return "I don't know that power action."
 
     def abort_shutdown(self) -> str:

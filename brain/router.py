@@ -49,9 +49,51 @@ try:
     from config import jarvis_config
     OWNER = jarvis_config.OWNER
     ENABLE_FAST_RESPONSES = jarvis_config.ENABLE_FAST_RESPONSES
+    MAX_INPUT_CHARS = jarvis_config.MAX_INPUT_CHARS
 except Exception:
     OWNER = "Sir"
     ENABLE_FAST_RESPONSES = True
+    MAX_INPUT_CHARS = 500
+
+
+# ── Input sanitisation ────────────────────────────────────────
+# Every utterance passes through validate_input() before the router
+# (or any command handler) sees it. This guarantees:
+#   * empty / whitespace-only input is rejected,
+#   * abnormally long input is rejected safely (never reaching
+#     command handlers or the LLM),
+#   * normal voice commands pass through unchanged (only surrounding
+#     whitespace is trimmed and internal whitespace collapsed).
+
+
+def sanitize_input(text: str | None) -> str:
+    """Normalize raw input: strip, collapse internal whitespace runs.
+
+    Returns '' for None/empty input. Does NOT enforce the length cap —
+    use validate_input() for the full check.
+    """
+    if not text:
+        return ""
+    return " ".join(text.strip().split())
+
+
+def validate_input(text: str | None, max_chars: int = MAX_INPUT_CHARS) -> str:
+    """
+    Validate and normalize one user utterance.
+
+    Returns the normalized text, or '' when the input is invalid
+    (empty / whitespace-only / exceeds ``max_chars``).
+    """
+    cleaned = sanitize_input(text)
+    if not cleaned:
+        return ""
+    if max_chars > 0 and len(cleaned) > max_chars:
+        logger.warning(
+            f"Input rejected: {len(cleaned)} chars exceeds the "
+            f"{max_chars} char limit."
+        )
+        return ""
+    return cleaned
 
 _FAST_TEMPLATES: dict = {
     "hello": "Hello, {owner}. How can I help you today?",
@@ -158,7 +200,15 @@ def _build_command_patterns() -> List[str]:
     folder_alt = _alt(FOLDER_NAMES)
 
     return [
-        # Launch desktop applications
+        # open/launch/start + any short noun phrase. The registry
+        # resolves it against the trusted WEBSITES/APPS/FOLDERS tables
+        # (with a safe fuzzy fallback for speech-recognition
+        # misspellings like "open chrom") and politely declines unknown
+        # targets — never executing arbitrary text.
+        r"\b(?:open|launch|start)\s+(?:the\s+|my\s+)?"
+        r"[a-z0-9][a-z0-9 .\-]{0,29}",
+
+        # Launch desktop applications (exact vocabulary, incl. "run")
         rf'\b(open|launch|start|run)\s+(the\s+)?({app_alt})\b',
 
         # Open websites
@@ -234,8 +284,10 @@ class IntentRouter:
     ]
 
     # ── System command phrases ────────────────────────────────
-    # Built from the command vocabulary (commands/system_commands.py)
-    # so the router and the registry can never drift apart.
+    # The registry (commands/registry.py) is the single resolver: the
+    # router only decides *whether* an utterance is command-like, and
+    # the registry decides *which* trusted command runs — so the two
+    # can never disagree about the vocabulary.
     COMMAND_PATTERNS: List[str] = _build_command_patterns()
 
     def __init__(self):
@@ -269,8 +321,13 @@ class IntentRouter:
 
         Returns:
             (intent, cleaned_text)
+
+        Invalid input (empty, whitespace-only, or longer than
+        MAX_INPUT_CHARS) is rejected up front with (UNKNOWN, "") — it
+        never reaches a command handler or the AI provider.
         """
-        if not user_input or not user_input.strip():
+        validated = validate_input(user_input)
+        if not validated:
             return Intent.UNKNOWN, ""
 
         # Normalize wake-name misrecognitions ("lajad" -> "jarvis"),

@@ -147,6 +147,28 @@ class SearchConfig:
     API_KEY: str = _env_str("SEARCH_API_KEY", "")
     # How many results to fetch per search.
     MAX_RESULTS: int = _env_int("SEARCH_MAX_RESULTS", 5)
+    # Seconds identical queries are served from cache (0 disables).
+    CACHE_TTL: int = _env_int("SEARCH_CACHE_TTL", 300)
+    # Upper bound on cached queries (oldest evicted first).
+    CACHE_MAX_ENTRIES: int = _env_int("SEARCH_CACHE_MAX_ENTRIES", 50)
+
+
+class MemoryConfig:
+    # Where the conversation history is persisted (JSON). Empty = in-memory only.
+    FILE: str = _env_str("MEMORY_FILE", "data/conversation.json")
+    # Save conversation history across restarts.
+    PERSIST: bool = _env_bool("MEMORY_PERSIST", True)
+
+
+class GroqConfig:
+    # Optional fallback LLM provider. Empty key = Groq disabled and the
+    # assistant runs on Ollama alone. The key is only ever read from the
+    # environment / .env — never hardcoded, never logged.
+    API_KEY: str = _env_str("GROQ_API_KEY", "")
+    MODEL: str = _env_str("GROQ_MODEL", "llama-3.3-70b-versatile")
+    TIMEOUT: int = _env_int("GROQ_TIMEOUT", 60)
+    TEMPERATURE: float = _env_float("GROQ_TEMPERATURE", 0.7)
+    MAX_TOKENS: int = _env_int("GROQ_MAX_TOKENS", 200)
 
 
 class JARVISConfig:
@@ -154,8 +176,16 @@ class JARVISConfig:
     WAKE_WORD: str = _env_str("JARVIS_WAKE_WORD", "jarvis")
     OWNER: str = _env_str("JARVIS_OWNER", "Sir")
 
-    # Which AI provider to use ("ollama" today; extensible).
+    # Which AI provider to use ("ollama" primary, "groq" optional fallback).
     AI_PROVIDER: str = _env_str("AI_PROVIDER", "ollama")
+
+    # Max characters accepted per user utterance. Longer input is
+    # rejected politely instead of being routed to handlers or the LLM.
+    MAX_INPUT_CHARS: int = _env_int("JARVIS_MAX_INPUT_CHARS", 500)
+
+    # Seconds a CONFIRM-permission command (shutdown/restart/sleep) stays
+    # pending before it expires and can never be executed. 0 = no timeout.
+    CONFIRMATION_TIMEOUT: int = _env_int("CONFIRMATION_TIMEOUT", 30)
 
     # Answer mode for the question classifier:
     #   auto  — decide per question whether fresh info is needed (default)
@@ -186,3 +216,242 @@ tts_config = TTSConfig()
 jarvis_config = JARVISConfig()
 log_config = LogConfig()
 search_config = SearchConfig()
+memory_config = MemoryConfig()
+groq_config = GroqConfig()
+
+
+# ── Configuration validation ─────────────────────────────────
+# validate_config() audits every setting that matters and returns a
+# list of problems: {"setting", "message", "fatal"}.
+#
+#   fatal=True  — genuinely invalid required configuration; JARVIS
+#                 should refuse to start until it is fixed.
+#   fatal=False — a warning; the affected feature degrades gracefully.
+#
+# Secret values are NEVER included in any message — only setting names.
+
+_VALID_TTS_ENGINES = ("piper", "pyttsx3")
+_VALID_AI_PROVIDERS = ("ollama", "groq")
+_VALID_AI_MODES = ("auto", "local", "web")
+_VALID_WHISPER_DEVICES = ("cpu", "cuda", "auto")
+_VALID_WHISPER_COMPUTE = ("int8", "float16", "int8_float16")
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_VALID_SEARCH_PROVIDERS = ("tavily", "serper", "brave", "none", "disabled", "off", "local")
+
+
+def _problem(setting: str, message: str, fatal: bool = False) -> dict:
+    return {"setting": setting, "message": message, "fatal": fatal}
+
+
+def validate_config() -> list[dict]:
+    """Audit the loaded configuration. Returns a list of problem dicts
+    (never raises). See module docstring for the shape."""
+    problems: list[dict] = []
+    c = jarvis_config
+
+    # ── AI provider ────────────────────────────────────────────
+    if (c.AI_PROVIDER or "ollama").strip().lower() not in _VALID_AI_PROVIDERS:
+        problems.append(_problem(
+            "AI_PROVIDER",
+            f"'{c.AI_PROVIDER}' is not supported (use ollama or groq).",
+            fatal=True,
+        ))
+    if (c.AI_MODE or "auto") not in _VALID_AI_MODES:
+        problems.append(_problem(
+            "AI_MODE",
+            f"'{c.AI_MODE}' is not supported (use auto, local or web).",
+        ))
+    if c.MAX_INPUT_CHARS < 1:
+        problems.append(_problem(
+            "JARVIS_MAX_INPUT_CHARS",
+            "must be at least 1 character.",
+            fatal=True,
+        ))
+    if c.CONFIRMATION_TIMEOUT < 0:
+        problems.append(_problem(
+            "CONFIRMATION_TIMEOUT",
+            "must be >= 0 seconds (0 disables the timeout).",
+            fatal=True,
+        ))
+
+    # ── Ollama ─────────────────────────────────────────────────
+    o = ollama_config
+    if not o.BASE_URL.startswith(("http://", "https://")):
+        problems.append(_problem(
+            "OLLAMA_BASE_URL",
+            "must start with http:// or https://.",
+            fatal=True,
+        ))
+    if not (o.MODEL or "").strip():
+        problems.append(_problem(
+            "OLLAMA_MODEL", "must not be empty.", fatal=True,
+        ))
+    if o.TIMEOUT <= 0:
+        problems.append(_problem(
+            "OLLAMA_TIMEOUT", "must be > 0 seconds.", fatal=True,
+        ))
+    if not 0.0 <= o.TEMPERATURE <= 2.0:
+        problems.append(_problem(
+            "OLLAMA_TEMPERATURE", "must be between 0.0 and 2.0.",
+            fatal=True,
+        ))
+    if o.NUM_PREDICT <= 0:
+        problems.append(_problem(
+            "OLLAMA_NUM_PREDICT", "must be > 0 tokens.", fatal=True,
+        ))
+    if o.NUM_CTX <= 0:
+        problems.append(_problem(
+            "OLLAMA_NUM_CTX", "must be > 0 tokens.", fatal=True,
+        ))
+
+    # ── Groq (optional) ────────────────────────────────────────
+    g = groq_config
+    if g.API_KEY and not (g.MODEL or "").strip():
+        problems.append(_problem(
+            "GROQ_MODEL", "must not be empty when GROQ_API_KEY is set.",
+        ))
+    if g.API_KEY and g.TIMEOUT <= 0:
+        problems.append(_problem(
+            "GROQ_TIMEOUT", "must be > 0 seconds.",
+        ))
+
+    # ── Whisper / STT ──────────────────────────────────────────
+    w = whisper_config
+    if not (w.MODEL or "").strip():
+        problems.append(_problem(
+            "WHISPER_MODEL", "must not be empty.", fatal=True,
+        ))
+    if w.DEVICE not in _VALID_WHISPER_DEVICES:
+        problems.append(_problem(
+            "WHISPER_DEVICE",
+            f"'{w.DEVICE}' is not supported (use cpu, cuda or auto).",
+            fatal=True,
+        ))
+    if w.COMPUTE_TYPE not in _VALID_WHISPER_COMPUTE:
+        problems.append(_problem(
+            "WHISPER_COMPUTE_TYPE",
+            f"'{w.COMPUTE_TYPE}' is not supported "
+            "(use int8, float16 or int8_float16).",
+            fatal=True,
+        ))
+    if w.BEAM_SIZE < 1:
+        problems.append(_problem(
+            "WHISPER_BEAM_SIZE", "must be >= 1.",
+        ))
+
+    s = stt_config
+    if not 8000 <= s.SAMPLE_RATE <= 96000:
+        problems.append(_problem(
+            "SAMPLE_RATE", "must be between 8000 and 96000 Hz.",
+            fatal=True,
+        ))
+    if s.TIMEOUT <= 0:
+        problems.append(_problem(
+            "STT_TIMEOUT", "must be > 0 seconds.", fatal=True,
+        ))
+    if s.PHRASE_LIMIT <= 0:
+        problems.append(_problem(
+            "STT_PHRASE_LIMIT", "must be > 0 seconds.", fatal=True,
+        ))
+    if s.INPUT_DEVICE is not None and s.INPUT_DEVICE < 0:
+        problems.append(_problem(
+            "INPUT_DEVICE", "must be a non-negative device index.",
+            fatal=True,
+        ))
+
+    # ── VAD ────────────────────────────────────────────────────
+    v = vad_config
+    if v.SILENCE_DURATION <= 0:
+        problems.append(_problem(
+            "VAD_SILENCE_DURATION", "must be > 0 seconds.", fatal=True,
+        ))
+    if v.CHUNK_DURATION <= 0:
+        problems.append(_problem(
+            "VAD_CHUNK_DURATION", "must be > 0 seconds.", fatal=True,
+        ))
+    if v.THRESHOLD_MULTIPLIER <= 0:
+        problems.append(_problem(
+            "VAD_THRESHOLD_MULTIPLIER", "must be > 0.", fatal=True,
+        ))
+    if v.MIN_THRESHOLD < 0:
+        problems.append(_problem(
+            "VAD_MIN_THRESHOLD", "must be >= 0.", fatal=True,
+        ))
+    if v.CALIBRATE_SECONDS < 0:
+        problems.append(_problem(
+            "VAD_CALIBRATE_SECONDS", "must be >= 0 seconds.",
+        ))
+    if v.MIN_SPEECH_CHUNKS < 1:
+        problems.append(_problem(
+            "VAD_MIN_SPEECH_CHUNKS", "must be >= 1.", fatal=True,
+        ))
+
+    # ── TTS ────────────────────────────────────────────────────
+    t = tts_config
+    if t.ENGINE not in _VALID_TTS_ENGINES:
+        problems.append(_problem(
+            "TTS_ENGINE",
+            f"'{t.ENGINE}' is not supported (use piper or pyttsx3).",
+            fatal=True,
+        ))
+    if t.ENGINE == "piper" and not (t.VOICE or "").strip():
+        problems.append(_problem(
+            "TTS_VOICE", "must not be empty when TTS_ENGINE=piper.",
+        ))
+    if t.VOICE_PATH and not os.path.isfile(t.VOICE_PATH):
+        problems.append(_problem(
+            "TTS_VOICE_PATH",
+            f"points to a file that does not exist: {t.VOICE_PATH}",
+        ))
+    if t.ENGINE == "pyttsx3" and not 1 <= t.RATE <= 500:
+        problems.append(_problem(
+            "TTS_RATE", "must be between 1 and 500 words per minute.",
+        ))
+    if not 0.0 <= t.VOLUME <= 1.0:
+        problems.append(_problem(
+            "TTS_VOLUME", "must be between 0.0 and 1.0.",
+        ))
+
+    # ── Memory ─────────────────────────────────────────────────
+    m = memory_config
+    if c.MEMORY_MAX_TURNS < 1:
+        problems.append(_problem(
+            "MEMORY_MAX_TURNS", "must be >= 1.", fatal=True,
+        ))
+    if c.MEMORY_MAX_CHARS < 0:
+        problems.append(_problem(
+            "MEMORY_MAX_CHARS", "must be >= 0 (0 = unlimited).", fatal=True,
+        ))
+    if m.PERSIST and not m.FILE.strip():
+        problems.append(_problem(
+            "MEMORY_FILE", "must not be empty when MEMORY_PERSIST is on.",
+        ))
+
+    # ── Search (optional) ──────────────────────────────────────
+    q = search_config
+    if (q.PROVIDER or "").strip().lower() not in _VALID_SEARCH_PROVIDERS:
+        problems.append(_problem(
+            "SEARCH_PROVIDER",
+            f"'{q.PROVIDER}' is unknown; web search will stay disabled.",
+        ))
+    if not 1 <= q.MAX_RESULTS <= 20:
+        problems.append(_problem(
+            "SEARCH_MAX_RESULTS", "must be between 1 and 20.",
+        ))
+    if q.CACHE_TTL < 0:
+        problems.append(_problem(
+            "SEARCH_CACHE_TTL", "must be >= 0 seconds (0 disables the cache).",
+        ))
+    if q.CACHE_MAX_ENTRIES < 1:
+        problems.append(_problem(
+            "SEARCH_CACHE_MAX_ENTRIES", "must be >= 1.",
+        ))
+
+    # ── Logging ────────────────────────────────────────────────
+    if (log_config.LEVEL or "INFO").strip().upper() not in _VALID_LOG_LEVELS:
+        problems.append(_problem(
+            "LOG_LEVEL",
+            f"'{log_config.LEVEL}' is not a valid log level.",
+        ))
+
+    return problems

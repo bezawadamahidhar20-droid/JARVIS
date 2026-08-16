@@ -198,3 +198,95 @@ def test_check_model_keepalive_no_keepalive_warns(monkeypatch):
     ok, detail, status = doctor._check_model_keepalive()
     assert ok is True
     assert status == "warn"
+
+
+# ── Issue 7: Piper diagnostics ────────────────────────────────
+
+def test_check_piper_installed(monkeypatch):
+    """Valid Piper install -> healthy with the version reported."""
+    from importlib.metadata import PackageNotFoundError
+
+    monkeypatch.setattr(
+        "importlib.metadata.version", lambda name: "1.6.1"
+    )
+    monkeypatch.setattr("importlib.metadata.PackageNotFoundError", PackageNotFoundError)
+    monkeypatch.setattr(doctor, "os_name", lambda: "nt")
+    monkeypatch.setattr("shutil.which", lambda exe: None)
+    ok, detail = doctor._check_piper()
+    assert ok is True
+    assert "1.6.1" in detail
+
+
+def test_check_piper_missing_package(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    def no_version(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("importlib.metadata.version", no_version)
+    monkeypatch.setattr("importlib.metadata.PackageNotFoundError", PackageNotFoundError)
+    ok, detail = doctor._check_piper()
+    assert ok is False
+    assert "not installed" in detail
+
+
+def test_check_piper_finds_executable(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    monkeypatch.setattr(
+        "importlib.metadata.version", lambda name: "1.6.1"
+    )
+    monkeypatch.setattr("importlib.metadata.PackageNotFoundError", PackageNotFoundError)
+    monkeypatch.setattr(doctor, "os_name", lambda: "nt")
+    monkeypatch.setattr(
+        "shutil.which", lambda exe: r"C:\tools\piper.exe" if exe == "piper.exe" else None
+    )
+    ok, detail = doctor._check_piper()
+    assert ok is True
+    assert "piper.exe" in detail
+
+
+def test_check_voice_model_missing_reports_path(monkeypatch, tmp_path):
+    from config import tts_config
+
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tts_config, "VOICE", "en_US-fancy-mega")
+    monkeypatch.setattr(tts_config, "VOICE_PATH", "")
+    ok, detail = doctor._check_voice_model()
+    assert ok is False
+    assert "en_US-fancy-mega" in detail
+    assert "download" in detail  # actionable fix hint
+
+
+def test_check_voice_model_present(monkeypatch, tmp_path):
+    from config import tts_config
+
+    (tmp_path / "voices").mkdir()
+    (tmp_path / "voices" / "en_US-lessac-medium.onnx").write_bytes(b"x")
+    (tmp_path / "voices" / "en_US-lessac-medium.onnx.json").write_bytes(b"{}")
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tts_config, "VOICE", "en_US-lessac-medium")
+    monkeypatch.setattr(tts_config, "VOICE_PATH", "")
+    ok, detail = doctor._check_voice_model()
+    assert ok is True
+    assert "onnx" in detail
+
+
+def test_check_voice_model_configured_path_missing(monkeypatch, tmp_path):
+    from config import tts_config
+
+    monkeypatch.setattr(tts_config, "VOICE_PATH", str(tmp_path / "nope.onnx"))
+    ok, detail = doctor._check_voice_model()
+    assert ok is False
+    assert "TTS_VOICE_PATH" in detail
+    assert "nope.onnx" in detail
+
+
+def test_check_config_reports_validation_problems(monkeypatch):
+    from config import tts_config
+
+    monkeypatch.setattr(tts_config, "ENGINE", "gcloud")
+    ok, detail = doctor._check_config()
+    assert ok is False
+    assert "TTS_ENGINE" in detail
+    assert "gcloud" in detail

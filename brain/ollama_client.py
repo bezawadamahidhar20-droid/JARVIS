@@ -20,7 +20,6 @@ ask_stream() emits each complete sentence to on_sentence() as it
 finishes; ask() remains for --text mode / non-streaming callers.
 """
 
-import re
 import json
 import time
 import requests
@@ -83,10 +82,10 @@ SEARCH_SYSTEM_PROMPT = (
     "VERIFIED SEARCH INFORMATION:\n{context}"
 )
 
-# A sentence ends at . ! ? (followed by whitespace or end) or a newline.
-# NOTE: must be "\n" (real newline) — "\\n" would match a literal
-# backslash-n and newline-splitting would silently never fire.
-_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)|\n")
+# Sentence splitting + markdown cleaning live in brain/text_utils.py
+# (shared with the Groq provider so both stream the same way).
+from brain.text_utils import clean_response, split_into_sentences  # noqa: E402
+
 # Safety valve: if a chunk of text is this long with no sentence end,
 # emit it anyway so speech never stalls on run-on text.
 MAX_PARTIAL_CHARS = 200
@@ -490,18 +489,9 @@ class OllamaClient(LLMProvider):
 
         Returns (sentences, remainder). A sentence ends at . ! ?
         (followed by whitespace or end-of-text) or a newline.
+        Common abbreviations ("Dr.", "e.g.", initials) never split.
         """
-        sentences = []
-        while True:
-            m = _SENTENCE_END_RE.search(buffer)
-            if not m:
-                break
-            end = m.end()
-            sentence = buffer[:end].rstrip("\n").strip()
-            buffer = buffer[end:]
-            if sentence:
-                sentences.append(sentence)
-        return sentences, buffer
+        return split_into_sentences(buffer)
 
     # ── Payload builders ──────────────────────────────────────
 
@@ -586,27 +576,8 @@ class OllamaClient(LLMProvider):
     # ── Response cleaning ─────────────────────────────────────
 
     def _clean_response(self, text: str) -> str:
-        """
-        Strip markdown artifacts that sound bad when spoken aloud.
-        """
-        # Remove any XML-style tags
-        text = re.sub(r'<[^>]+>', '', text)
-
-        # Remove markdown bold and italic markers
-        text = re.sub(r'\*+', '', text)
-
-        # Remove markdown headers
-        text = re.sub(
-            r'^#+\s*', '', text,
-            flags=re.MULTILINE
-        )
-        # Remove backtick code markers
-        text = re.sub(r'`+', '', text)
-
-        # Collapse extra blank lines
-        text = re.sub(r'\n{3,}', '\n\n', text)
-
-        return text.strip()
+        """Strip markdown artifacts that sound bad when spoken aloud."""
+        return clean_response(text)
 
 
 # ── Module-level convenience functions ────────────────────────

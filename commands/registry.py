@@ -23,6 +23,8 @@ Security model (see README):
 
 import inspect
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 
 from commands import system_commands, time_commands
@@ -37,8 +39,10 @@ try:
     from config import jarvis_config
 
     OWNER = jarvis_config.OWNER
+    CONFIRMATION_TIMEOUT = jarvis_config.CONFIRMATION_TIMEOUT
 except Exception:
     OWNER = "Sir"
+    CONFIRMATION_TIMEOUT = 30
 
 
 # ── Command patterns ────────────────────────────────────────────────────────
@@ -147,6 +151,60 @@ class CommandResult:
     def execute(self, text: str) -> str:
         """Run the command's handler (used after the user confirms)."""
         return self.command.execute(text)
+
+
+class PendingConfirmation:
+    """
+    Tracks a CONFIRM-permission command awaiting an explicit "yes".
+
+    Guarantees:
+      * ``take()`` returns the pending action at most ONCE — repeated
+        "yes" replies can never execute the command twice.
+      * After ``timeout`` seconds the confirmation expires and
+        ``take()`` returns None, so a stale confirmation can never be
+        executed later.
+      * All transitions are guarded by a lock, so concurrent inputs
+        cannot race the pending state.
+
+    The caller clears its reference on every terminal outcome
+    (success, rejection, timeout, exception) — see main.py.
+    """
+
+    def __init__(
+        self,
+        result: CommandResult,
+        original_text: str,
+        timeout: float | None = None,
+    ) -> None:
+        self.result = result
+        self.original_text = original_text
+        # timeout <= 0 disables the expiry (not recommended).
+        self.timeout = (
+            timeout if timeout is not None else float(CONFIRMATION_TIMEOUT)
+        )
+        self._created = time.monotonic()
+        self._lock = threading.Lock()
+        self._consumed = False
+
+    @property
+    def is_expired(self) -> bool:
+        """True when the confirmation window has passed."""
+        if self.timeout <= 0:
+            return False
+        return (time.monotonic() - self._created) > self.timeout
+
+    def take(self) -> tuple[CommandResult, str] | None:
+        """
+        Atomically claim the pending command if it is still valid.
+
+        Returns (result, original_text) exactly once; every later call
+        (and any call after the timeout) returns None.
+        """
+        with self._lock:
+            if self._consumed or self.is_expired:
+                return None
+            self._consumed = True
+            return self.result, self.original_text
 
 
 # Static time/date commands (matched via the shared regexes, not patterns).

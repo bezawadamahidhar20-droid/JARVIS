@@ -11,10 +11,20 @@ threshold:
     configured silence duration, or after the phrase length cap.
   * All timing/threshold knobs live in config.py (VAD_* settings).
 
+Event-driven capture (no polling): record_phrase() uses a sounddevice
+*callback* stream. PortAudio invokes the callback as soon as audio
+arrives, the callback updates the shared state and signals a
+threading.Event when the phrase is done, and the calling thread simply
+blocks on that event. There is no sleep-based polling loop, so CPU
+usage is negligible while waiting for speech and speech onset is
+reacted to immediately.
+
 The VAD only *captures* audio — transcription happens elsewhere
 (engine/stt.py). No audio hardware is touched at import time, so this
 module is unit-testable with synthetic arrays.
 """
+
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -144,7 +154,12 @@ class AdaptiveVAD:
 
     def record_phrase(self) -> np.ndarray | None:
         """
-        Record until the user stops speaking.
+        Record until the user stops speaking (event-driven).
+
+        The PortAudio callback thread feeds audio chunks into shared
+        state and sets ``done`` the moment the phrase finishes (silence
+        run, phrase cap, or the no-speech timeout). The calling thread
+        blocks on that event — no polling loop, no busy waiting.
 
         Returns:
             np.ndarray : int16 mono audio, or None on timeout/error.
@@ -154,10 +169,49 @@ class AdaptiveVAD:
         max_total = int(PHRASE_LIMIT / CHUNK_DURATION)
         max_wait = int(TIMEOUT / CHUNK_DURATION)
 
+        lock = threading.Lock()
         chunks: list[np.ndarray] = []
-        silence_count = 0
-        wait_count = 0
-        speaking = False
+        done = threading.Event()
+        state = {
+            "wait_count": 0,
+            "speaking": False,
+            "silence_count": 0,
+            "reason": "timeout",  # set to "speech_ended" when phrase done
+            "finished": False,
+        }
+
+        def _callback(indata, frames, time_info, status) -> None:  # noqa: ARG001
+            # Copy! PortAudio reuses the buffer after the callback.
+            chunk = np.asarray(indata, dtype=np.int16).reshape(-1).copy()
+            level = rms(chunk)
+            self.live_rms = level
+
+            with lock:
+                if not state["speaking"]:
+                    state["wait_count"] += 1
+                    if state["wait_count"] > max_wait:
+                        state["reason"] = "timeout"
+                        state["finished"] = True
+                        done.set()
+                        return
+                    if level > self.threshold:
+                        state["speaking"] = True
+                        self.live_speech = True
+                        chunks.append(chunk)
+                        if VERBOSE:
+                            print("[Speech detected...]")
+                    return
+
+                chunks.append(chunk)
+                if level < self.threshold:
+                    state["silence_count"] += 1
+                else:
+                    state["silence_count"] = 0
+
+                if state["silence_count"] >= max_silence or len(chunks) >= max_total:
+                    state["reason"] = "speech_ended"
+                    state["finished"] = True
+                    done.set()
 
         try:
             if VERBOSE:
@@ -169,39 +223,16 @@ class AdaptiveVAD:
                 dtype=self.dtype,
                 blocksize=chunk_size,
                 device=self.input_device,
+                callback=_callback,
             ) as stream:
-
-                while True:
-                    raw, _ = stream.read(chunk_size)
-                    chunk = np.frombuffer(bytes(raw), dtype=np.int16)
-                    level = rms(chunk)
-                    self.live_rms = level
-
-                    if not speaking:
-                        wait_count += 1
-                        if wait_count > max_wait:
-                            logger.debug(
-                                "No speech within timeout; giving up."
-                            )
-                            return None  # nobody spoke
-                        if level > self.threshold:
-                            speaking = True
-                            self.live_speech = True
-                            chunks.append(chunk)
-                            if VERBOSE:
-                                print("[Speech detected...]")
-                    else:
-                        chunks.append(chunk)
-                        if level < self.threshold:
-                            silence_count += 1
-                        else:
-                            silence_count = 0
-
-                        if silence_count >= max_silence:
-                            break
-                        if len(chunks) >= max_total:
-                            break
-
+                # Block (event-driven) until the callback signals the
+                # phrase is done. The +1s margin covers the case where
+                # the stream never delivers data (dead device).
+                done.wait(timeout=max_wait * CHUNK_DURATION + 1.0)
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
         except sd.PortAudioError as e:
             logger.error(f"PortAudio error while recording: {e}")
             return None
@@ -211,10 +242,16 @@ class AdaptiveVAD:
         finally:
             self.live_speech = False
 
-        if len(chunks) < MIN_SPEECH_CHUNKS:
+        with lock:
+            if not state["finished"] or state["reason"] != "speech_ended":
+                logger.debug("No speech within timeout; giving up.")
+                return None  # nobody spoke / dead device
+            captured = chunks
+
+        if len(captured) < MIN_SPEECH_CHUNKS:
             logger.debug("Speech too short, ignoring as noise blip.")
             return None
 
         if VERBOSE:
             print("[Processing...]")
-        return np.concatenate(chunks, axis=0)
+        return np.concatenate(captured, axis=0)

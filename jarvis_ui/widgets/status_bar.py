@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from jarvis_ui.ui_state import LISTENING, THINKING, SPEAKING, IDLE, SHUTDOWN
+from jarvis_ui.ui_state import LISTENING, THINKING, SPEAKING, IDLE, ERROR, SHUTDOWN
 
 # ── Colours (configurable) ────────────────────────────────────────────────────
 TITLE_GLOW = (0.0, 0.8, 1.0, 1.0)
@@ -105,6 +105,7 @@ class TopStatusBar(QWidget):
             THINKING: (0, 220, 255),
             SPEAKING: (255, 160, 60),
             IDLE: (120, 160, 220),
+            ERROR: (255, 40, 40),
             SHUTDOWN: (255, 60, 60),
         }.get(status, (120, 160, 220))
         label_text = {
@@ -112,6 +113,7 @@ class TopStatusBar(QWidget):
             THINKING: "THINKING...",
             SPEAKING: "SPEAKING...",
             IDLE: "IDLE",
+            ERROR: "ERROR",
             SHUTDOWN: "SHUTDOWN",
         }.get(status, "IDLE")
 

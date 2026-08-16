@@ -33,6 +33,7 @@ IDLE = "idle"
 LISTENING = "listening"
 THINKING = "thinking"
 SPEAKING = "speaking"
+ERROR = "error"
 SHUTDOWN = "shutdown"
 
 STATUS_LABELS = {
@@ -40,6 +41,7 @@ STATUS_LABELS = {
     LISTENING: "LISTENING...",
     THINKING: "THINKING...",
     SPEAKING: "SPEAKING...",
+    ERROR: "ERROR",
     SHUTDOWN: "SHUTDOWN",
 }
 
@@ -235,13 +237,7 @@ class JARVISController:
             from brain.ollama_client import (  # noqa: F401
                 OllamaClient,
             )
-            from brain.router import (  # noqa: F401
-                AI_QUESTION,
-                CLEAR_MEMORY,
-                COMMAND,
-                EXIT,
-                IntentRouter,
-            )
+            from brain.router import Intent, IntentRouter  # noqa: F401
             from commands.registry import CommandRegistry  # noqa: F401
             from engine.microphone import MicrophoneManager  # noqa: F401
             from engine.stt import STTEngine  # noqa: F401
@@ -276,10 +272,10 @@ class JARVISController:
         self.ollama = OllamaClient()
         self.router = IntentRouter()
         self.commands = CommandRegistry()
-        self.tts = TTSEngine(rate=config.TTS_RATE)
+        self.tts = TTSEngine(rate=config.tts_config.RATE)
         mic = MicrophoneManager()
         self.mic = mic
-        self.stt = STTEngine(mic, language=config.STT_LANGUAGE, timeout=config.STT_TIMEOUT)
+        self.stt = STTEngine(mic)
 
         # Probe connectivity (non-blocking, never raises).
         self.state.mic_available = mic.is_available()
@@ -290,10 +286,13 @@ class JARVISController:
         self.ui_queue.put({"event": "stats", "cpu": 0.0, "ram": 0.0})
 
         if mic.is_available():
-            self.stt.calibrate()
+            try:
+                self.stt.vad.calibrate()
+            except Exception:
+                pass
 
         greeting = (
-            f"Good day, {config.JARVIS_OWNER}. JARVIS is online and ready. "
+            f"Good day, {config.jarvis_config.OWNER}. JARVIS is online and ready. "
             "How can I help you?"
         )
         self._respond(self.tts, greeting, from_boot=True)
@@ -339,7 +338,7 @@ class JARVISController:
 
     def _process_text(self, text: str) -> None:
         """Route + answer a single utterance (shared by mic and typed input)."""
-        from brain.router import AI_QUESTION, CLEAR_MEMORY, COMMAND, EXIT
+        from brain.router import Intent
 
         self.state.current_input = text
         self.state.push_conversation("user", text)
@@ -352,13 +351,13 @@ class JARVISController:
 
         intent, cleaned = self.router.route(text)
 
-        if intent == EXIT:
+        if intent == Intent.EXIT:
             self._respond(self.tts, "Goodbye, see you soon.")
             self.ui_queue.put(status_event(SHUTDOWN))
             self.stop()
             return
 
-        if intent == CLEAR_MEMORY:
+        if intent == Intent.CLEAR_MEMORY:
             self.memory.clear()
             self.state.clear_conversation()
             self.ui_queue.put({"event": "memory_cleared"})
@@ -367,26 +366,35 @@ class JARVISController:
             self.ui_queue.put(module_event("ROUTER", False))
             return
 
-        if intent == COMMAND:
+        if intent == Intent.COMMAND:
+            failed = False
             try:
                 response = self.commands.execute(cleaned)
             except Exception:
+                failed = True
                 response = "Sorry, I couldn't complete that command."
             self.state.add_command_history(cleaned)
+            if failed:
+                self.state.set_status(ERROR)
+                self.ui_queue.put(status_event(ERROR))
             self._respond(self.tts, response)
             self.ui_queue.put(module_event("STT", False))
             self.ui_queue.put(module_event("ROUTER", False))
             return
 
         # AI_QUESTION — the default for everything else.
+        failed = False
         try:
             self.memory.add_user_message(cleaned)
             t0 = time.perf_counter()
             response = self.ollama.ask(cleaned, self.memory)
             self.state.response_time = time.perf_counter() - t0
             self.state.ollama_connected = True
+            if not response:
+                raise RuntimeError("empty provider response")
         except Exception:
             self.state.ollama_connected = False
+            failed = True
             response = (
                 "My AI brain is offline right now. Please start Ollama "
                 "and I'll be back to normal."
@@ -395,6 +403,10 @@ class JARVISController:
         self.state.confidence = 0.94
         self.state.route = "Qwen3 Brain"
         self.state.thinking_progress = 1.0
+        if failed:
+            # Surface the failure to the UI (red ERROR state).
+            self.state.set_status(ERROR)
+            self.ui_queue.put(status_event(ERROR))
         self._respond(self.tts, response)
         self.ui_queue.put(module_event("STT", False))
         self.ui_queue.put(module_event("ROUTER", False))

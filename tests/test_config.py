@@ -16,6 +16,7 @@ from config import (
     vad_config,
     whisper_config,
     jarvis_config,
+    validate_config,
 )
 
 
@@ -72,3 +73,68 @@ def test_singletons_are_consistent():
     assert isinstance(ollama_config.MODEL, str) and len(ollama_config.MODEL) > 0
     assert isinstance(whisper_config.MODEL, str) and len(whisper_config.MODEL) > 0
     assert stt_config.INPUT_DEVICE is None or stt_config.INPUT_DEVICE >= 0
+
+
+# ── Issue 16: configuration validation ────────────────────────
+
+
+def _fatal(problems):
+    return [p for p in problems if p["fatal"]]
+
+
+def test_valid_config_has_no_fatal_problems():
+    problems = validate_config()
+    # The real .env on this machine (or defaults) must be startable.
+    assert _fatal(problems) == []
+
+
+def test_unknown_tts_engine_is_fatal(monkeypatch):
+    monkeypatch.setattr(tts_config, "ENGINE", "gcloud")
+    problems = validate_config()
+    matching = [p for p in problems if p["setting"] == "TTS_ENGINE"]
+    assert matching and matching[0]["fatal"] is True
+
+
+def test_unknown_ai_provider_is_fatal(monkeypatch):
+    monkeypatch.setattr(jarvis_config, "AI_PROVIDER", "skynet")
+    problems = validate_config()
+    matching = [p for p in problems if p["setting"] == "AI_PROVIDER"]
+    assert matching and matching[0]["fatal"] is True
+
+
+def test_negative_timeout_is_fatal(monkeypatch):
+    monkeypatch.setattr(stt_config, "TIMEOUT", -5)
+    problems = validate_config()
+    matching = [p for p in problems if p["setting"] == "STT_TIMEOUT"]
+    assert matching and matching[0]["fatal"] is True
+
+
+def test_bad_whisper_device_is_fatal(monkeypatch):
+    monkeypatch.setattr(whisper_config, "DEVICE", "tpu")
+    problems = validate_config()
+    matching = [p for p in problems if p["setting"] == "WHISPER_DEVICE"]
+    assert matching and matching[0]["fatal"] is True
+
+
+def test_optional_misconfig_is_warning_not_fatal(monkeypatch):
+    # A bad search provider only disables web search — a warning, not
+    # a startup blocker.
+    from config import search_config
+
+    monkeypatch.setattr(search_config, "PROVIDER", "bogus")
+    problems = validate_config()
+    matching = [p for p in problems if p["setting"] == "SEARCH_PROVIDER"]
+    assert matching and matching[0]["fatal"] is False
+
+
+def test_validation_messages_never_contain_secrets():
+    """Validation output must reference setting names only — never
+    API keys or other secret values."""
+    from config import groq_config, search_config
+
+    for p in validate_config():
+        text = f"{p['setting']} {p['message']}".lower()
+        for secret in (search_config.API_KEY, groq_config.API_KEY):
+            if secret and secret.lower() in text:
+                raise AssertionError("validation leaked a secret value")
+    assert True

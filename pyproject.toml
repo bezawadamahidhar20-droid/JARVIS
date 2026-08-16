@@ -9,22 +9,26 @@ description = "JARVIS — a private, local AI voice assistant for Windows"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+# Mirrors requirements.txt (pinned). numpy is a range because a single
+# version cannot span Python 3.10 (2.2.x) through 3.14 (2.5.x).
 dependencies = [
-    "faster-whisper>=1.0",
-    "piper-tts>=1.2",
-    "sounddevice>=0.5",
-    "numpy>=1.24",
-    "requests>=2.31",
-    "python-dotenv>=1.0",
-    "pyautogui>=0.9",
-    "pillow>=10",
-    "rich>=13",
-    "SpeechRecognition>=3.10",
-    "pyttsx3>=2.90",
+    "faster-whisper==1.2.1",
+    "piper-tts==1.6.1",
+    "sounddevice==0.5.5",
+    "numpy>=2.2,<2.6",
+    "requests==2.34.2",
+    "python-dotenv==1.2.2",
+    "pyautogui==0.9.54",
+    "pillow==12.3.0",
+    "pycaw==20251023",
+    "comtypes==1.4.16",
+    "rich==15.0.0",
+    "SpeechRecognition==3.17.0",
+    "pyttsx3==2.99",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest==9.1.1", "ruff==0.16.3", "hypothesis>=6.100,<7"]
 gui = ["PySide6>=6.6", "PyOpenGL>=3.1", "psutil>=5.9"]
 
 [project.scripts]
@@ -39,3 +43,15 @@ filterwarnings = [
     # sounddevice 0.5.x uses the deprecated `array.shape = ...` idiom.
     "ignore:Setting the shape on a NumPy array:DeprecationWarning",
 ]
+
+[tool.ruff]
+target-version = "py310"
+# jarvis_ui carries pre-existing OpenGL painting debt that is out of
+# scope here; linting focuses on the core runtime + tests.
+# Notebooks are not Python modules (E401 in a %%capture cell).
+extend-exclude = ["jarvis_ui/**", "*.ipynb"]
+
+[tool.ruff.lint]
+# F = pyflakes (real bugs: unused imports, undefined names)
+# E4/E7/E9 = syntax-adjacent style that catches genuine mistakes
+select = ["F", "E4", "E7", "E9"]

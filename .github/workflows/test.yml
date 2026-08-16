@@ -1,12 +1,10 @@
-name: Offline Tests
+name: CI
 
-# Runs on every push and every pull-request against master.
-# Only the tests that need NO microphone, NO Ollama, NO speakers are included:
-#   - test_router.py     (router logic, exit-safety checks)
-#   - test_benchmark.py  (Whisper model loading + WAV transcription)
+# Runs on every push and every pull-request against master/main.
 #
-# The benchmark test is skipped when the required WAV fixture is absent so that
-# a fresh clone still passes (the WAV is produced by the interactive mic tests).
+# The full test suite is fully mocked: no microphone, no speakers, no
+# GPU, no Piper voice, no Ollama server, no Groq API key are required —
+# every external dependency is faked inside the tests.
 
 on:
   push:
@@ -15,9 +13,9 @@ on:
     branches: ["master", "main"]
 
 jobs:
-  offline-tests:
-    name: "Offline tests — Python ${{ matrix.python-version }}"
-    runs-on: windows-latest          # mirrors the primary dev platform
+  test:
+    name: "Test — Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
@@ -25,60 +23,27 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      # ── Checkout ────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Python ──────────────────────────────────────────────────────────────
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      # ── Cache pip downloads ──────────────────────────────────────────────────
-      - name: Cache pip
+      - name: Cache pip downloads
         uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\pip\Cache
-          key: pip-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
           restore-keys: |
             pip-${{ runner.os }}-py${{ matrix.python-version }}-
 
-      # ── Dependencies ────────────────────────────────────────────────────────
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
 
-      # ── Router tests (fully offline, no hardware needed) ────────────────────
-      - name: Run router offline check
-        run: python test_router.py
-        # Exits 0 if all routing decisions are correct and no exit phrase leaks
-        # into the router. Exits 1 and prints FAIL lines if something regresses.
+      - name: Lint (ruff)
+        run: ruff check .
 
-      # ── Benchmark / Whisper offline test ────────────────────────────────────
-      # The test loads (and downloads on first run) the Whisper 'tiny.en' and
-      # 'base' models, then transcribes a WAV fixture if one exists.
-      # The Whisper models are cached between runs to avoid repeated downloads.
-      - name: Cache Whisper models
-        uses: actions/cache@v4
-        with:
-          path: ~\AppData\Local\huggingface\hub
-          key: whisper-models-${{ runner.os }}
-          restore-keys: whisper-models-
-
-      - name: Run Whisper benchmark (WAV fixture optional)
-        # If no WAV file is present the script prints a short error and exits
-        # gracefully with code 0 — we treat "no fixture" as a skip, not a fail.
-        run: |
-          if (Test-Path "test_audio.wav") {
-            python test_benchmark.py test_audio.wav
-          } else {
-            Write-Host "[skip] test_audio.wav not present — skipping Whisper benchmark."
-          }
-        shell: pwsh
-
-      # ── Summary ─────────────────────────────────────────────────────────────
-      - name: Print summary
-        if: always()
-        run: |
-          Write-Host "Offline test run complete for Python ${{ matrix.python-version }}."
-        shell: pwsh
+      - name: Run tests
+        run: pytest tests/ -q

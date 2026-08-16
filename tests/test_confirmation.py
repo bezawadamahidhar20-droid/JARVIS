@@ -1,10 +1,12 @@
 """Confirmation flow + web-search integration tests (all faked)."""
 
+import time
+
 import commands.system_commands as sc
 from brain.memory import ConversationMemory
 from brain.router import IntentRouter
 from brain.search import SearchResult
-from commands.registry import CommandRegistry
+from commands.registry import CommandRegistry, PendingConfirmation
 from main import JARVIS
 
 
@@ -102,7 +104,7 @@ def make_jarvis(provider=None, search=None, text_mode=True):
             "mic": FakeMic(),
             "stt": FakeSTT(),
             "tts": FakeTTS(),
-            "memory": ConversationMemory(max_turns=6, max_chars=3000),
+            "memory": ConversationMemory(max_turns=6, max_chars=3000, persist_path=""),
             "provider": provider if provider is not None else FakeProvider(),
             "router": IntentRouter(),
             "commands": CommandRegistry(),
@@ -165,6 +167,80 @@ def test_confirm_commands_never_run_via_registry_execute():
     # Back-compat entry point must also refuse to auto-execute.
     response = jarvis.commands.execute("shut down my computer")
     assert "continue" in response
+
+
+# ── Issue 2: confirmation timeout + exactly-once execution ────
+
+def test_confirmation_executes_exactly_once(monkeypatch):
+    runs = []
+    monkeypatch.setattr(sc.subprocess, "run", lambda args, **k: runs.append(args))
+    jarvis = make_jarvis()
+    assert jarvis.process_input("shut down my computer") is True
+    assert jarvis.process_input("yes") is True
+    assert len(runs) == 1
+    # A second "yes" (nothing pending now) must not re-execute.
+    jarvis.tts.spoken.clear()
+    assert jarvis.process_input("yes") is True
+    assert len(runs) == 1
+    assert jarvis._pending is None
+
+
+def test_confirmation_expires_after_timeout(monkeypatch):
+    """Dangerous command -> wait past timeout -> "yes" must NOT execute."""
+    runs = []
+    monkeypatch.setattr(sc.subprocess, "run", lambda args, **k: runs.append(args))
+    jarvis = make_jarvis()
+    result = jarvis.commands.execute_with_meta("shut down my computer")
+    jarvis._pending = PendingConfirmation(
+        result, "shut down my computer", timeout=0.05
+    )
+    time.sleep(0.06)
+    assert jarvis.process_input("yes") is True
+    assert runs == []  # stale confirmation never executed
+    assert jarvis._pending is None
+    assert any("timed out" in s.lower() for s in jarvis.tts.spoken)
+
+
+def test_pending_take_is_atomic_once():
+    result = make_jarvis().commands.execute_with_meta("shut down my computer")
+    pending = PendingConfirmation(result, "shut down my computer", timeout=30)
+    assert pending.take() is not None
+    assert pending.take() is None  # second claim refused
+    assert pending.take() is None
+
+
+def test_pending_expired_take_returns_none():
+    result = make_jarvis().commands.execute_with_meta("shut down my computer")
+    pending = PendingConfirmation(result, "text", timeout=0.01)
+    time.sleep(0.02)
+    assert pending.is_expired is True
+    assert pending.take() is None
+
+
+def test_pending_timeout_zero_never_expires():
+    result = make_jarvis().commands.execute_with_meta("shut down my computer")
+    pending = PendingConfirmation(result, "text", timeout=0)
+    assert pending.is_expired is False
+    assert pending.take() is not None
+
+
+def test_confirmation_cleared_on_exception(monkeypatch):
+    """A handler that throws must clear the pending state and speak a
+    friendly error — never leave a stale confirmation around."""
+    class BoomResult:
+        name = "power"
+        permission = "confirm"
+        confirm_prompt = "continue?"
+        needs_confirmation = True
+
+        def execute(self, text):
+            raise RuntimeError("boom")
+
+    jarvis = make_jarvis()
+    jarvis._pending = PendingConfirmation(BoomResult(), "shut down")
+    assert jarvis.process_input("yes") is True
+    assert jarvis._pending is None
+    assert any("couldn't complete" in s.lower() for s in jarvis.tts.spoken)
 
 
 # ── Stop speaking ─────────────────────────────────────────────

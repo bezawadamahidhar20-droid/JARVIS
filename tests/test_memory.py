@@ -3,9 +3,12 @@
 
 from brain.memory import ConversationMemory
 
+# Tests never touch the real data/ file — persistence is disabled by
+# passing an empty persist_path (covered separately in test_memory_persist).
+
 
 def test_add_and_history():
-    mem = ConversationMemory(max_turns=6, max_chars=3000)
+    mem = ConversationMemory(max_turns=6, max_chars=3000, persist_path="")
     mem.add_user_message("hello")
     mem.add_assistant_message("hi there")
     history = mem.get_history()
@@ -15,14 +18,14 @@ def test_add_and_history():
 
 
 def test_empty_messages_ignored():
-    mem = ConversationMemory(max_turns=6, max_chars=3000)
+    mem = ConversationMemory(max_turns=6, max_chars=3000, persist_path="")
     mem.add_user_message("")
     mem.add_assistant_message("   ")
     assert len(mem) == 0
 
 
 def test_turn_limit_drops_oldest_pair():
-    mem = ConversationMemory(max_turns=2, max_chars=3000)
+    mem = ConversationMemory(max_turns=2, max_chars=3000, persist_path="")
     for i in range(4):
         mem.add_user_message(f"u{i}")
         mem.add_assistant_message(f"a{i}")
@@ -36,7 +39,7 @@ def test_turn_limit_drops_oldest_pair():
 
 
 def test_char_limit_trims_old_turns():
-    mem = ConversationMemory(max_turns=6, max_chars=100)
+    mem = ConversationMemory(max_turns=6, max_chars=100, persist_path="")
     mem.add_user_message("x" * 40)
     mem.add_assistant_message("y" * 40)
     mem.add_user_message("z" * 40)
@@ -51,7 +54,7 @@ def test_char_limit_trims_old_turns():
 
 
 def test_clear():
-    mem = ConversationMemory(max_turns=6, max_chars=3000)
+    mem = ConversationMemory(max_turns=6, max_chars=3000, persist_path="")
     mem.add_user_message("hello")
     mem.clear()
     assert len(mem) == 0

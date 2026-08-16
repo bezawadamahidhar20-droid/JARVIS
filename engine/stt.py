@@ -37,9 +37,35 @@ except Exception:
     SAMPLE_RATE = 16000
     WHISPER_MODEL = "base"
     WHISPER_COMPUTE_TYPE = "int8"
-    WHISPER_DEVICE = "cpu"
+    WHISPER_DEVICE = "auto"
     WHISPER_LANGUAGE = "en"
     WHISPER_BEAM_SIZE = 1
+
+
+# Compute type used when CUDA is selected but the config still says the
+# CPU-only "int8" (ctranslate2 does not support int8 kernels on CUDA).
+_CUDA_COMPUTE_TYPE = "float16"
+
+
+def _detect_device(preferred: str = WHISPER_DEVICE) -> str:
+    """
+    Resolve the Whisper device: "cpu", "cuda", or "auto".
+
+    "auto" (the default) uses CUDA when the installed ctranslate2 has a
+    CUDA-capable GPU, and falls back to CPU otherwise — so machines
+    without NVIDIA hardware never crash and never need CUDA installed.
+    """
+    if preferred != "auto":
+        return preferred
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            logger.info("CUDA detected — using GPU for Whisper.")
+            return "cuda"
+    except Exception as e:
+        logger.debug(f"CUDA detection skipped: {e}")
+    return "cpu"
 
 
 class STTEngine:
@@ -65,6 +91,11 @@ class STTEngine:
         """
         Load the Faster-Whisper model once at startup.
 
+        With WHISPER_DEVICE=auto (default) the best available device is
+        chosen automatically; if a CUDA load fails for any reason
+        (missing cuDNN, driver, out-of-memory) the model is retried on
+        CPU so JARVIS never crashes on GPU-less machines.
+
         Returns True on success. Safe to call repeatedly (idempotent).
         """
         if self._loaded and self.model is not None:
@@ -73,18 +104,48 @@ class STTEngine:
             t0 = time.perf_counter()
             from faster_whisper import WhisperModel
 
+            device = _detect_device(self.device)
+            compute = self.compute_type
+            if device == "cuda" and compute == "int8":
+                # int8 is a CPU-only compute type; CUDA needs float16.
+                logger.info(
+                    "CUDA selected — switching compute type "
+                    f"'{compute}' -> '{_CUDA_COMPUTE_TYPE}'."
+                )
+                compute = _CUDA_COMPUTE_TYPE
+
             logger.info(
                 f"Loading Faster-Whisper model '{self.model_name}' "
-                f"({self.device}/{self.compute_type})..."
+                f"({device}/{compute})..."
             )
-            self.model = WhisperModel(
-                self.model_name,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            try:
+                self.model = WhisperModel(
+                    self.model_name,
+                    device=device,
+                    compute_type=compute,
+                )
+            except Exception as e:
+                if device != "cuda":
+                    raise
+                # CUDA load failed — fall back to CPU, never crash.
+                logger.warning(
+                    f"CUDA load failed ({e}); falling back to CPU."
+                )
+                device = "cpu"
+                compute = "int8"
+                self.model = WhisperModel(
+                    self.model_name,
+                    device=device,
+                    compute_type=compute,
+                )
+
+            # Keep the effective device/compute for describe() and logs.
+            self.device = device
+            self.compute_type = compute
             self._loaded = True
             logger.info(
-                f"Whisper model ready in {time.perf_counter() - t0:.1f}s"
+                f"Whisper model ready in {time.perf_counter() - t0:.1f}s "
+                f"({self.device}/{self.compute_type})."
             )
             return True
         except ImportError:

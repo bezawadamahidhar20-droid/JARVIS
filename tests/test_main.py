@@ -84,7 +84,7 @@ def make_jarvis(provider=None, text_mode=True):
             "mic": FakeMic(),
             "stt": FakeSTT(),
             "tts": FakeTTS(),
-            "memory": ConversationMemory(max_turns=6, max_chars=3000),
+            "memory": ConversationMemory(max_turns=6, max_chars=3000, persist_path=""),
             "provider": provider if provider is not None else FakeProvider(),
             "router": IntentRouter(),
             "commands": CommandRegistry(),

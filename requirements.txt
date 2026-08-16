@@ -1,36 +1,41 @@
 # JARVIS — runtime dependencies
-# Python 3.10+  |  Windows (primary)
+# Python 3.10-3.14  |  Windows (primary)
 #
 # Install:  pip install -r requirements.txt
 # Or run:   .\install.ps1  (creates .venv, installs, puts `jarvis` on PATH)
+#
+# Versions are pinned to known-good releases verified against this
+# project. numpy is the one exception: it must span the supported
+# Python range (2.2.x supports 3.10; 2.5.x supports 3.12-3.14), so it
+# is pinned to a range instead of a single version.
 
 # ── Speech-to-text (local) ─────────────────────────────────────
-faster-whisper>=1.0.0     # Local Whisper transcription (CTranslate2)
-numpy>=1.24               # Audio buffers (int16/float32 conversion)
-sounddevice>=0.5.0        # Microphone capture + playback (PortAudio DLLs bundled)
+faster-whisper==1.2.1     # Local Whisper transcription (CTranslate2)
+numpy>=2.2,<2.6           # Audio buffers (int16/float32 conversion)
+sounddevice==0.5.5        # Microphone capture + playback (PortAudio DLLs bundled)
 
 # ── Text-to-speech (local) ─────────────────────────────────────
-piper-tts>=1.2.0          # Neural TTS (ONNX voice in voices/)
+piper-tts==1.6.1          # Neural TTS (ONNX voice in voices/)
 
 # ── AI brain ───────────────────────────────────────────────────
-requests>=2.31.0          # Ollama HTTP client
+requests==2.34.2          # Ollama + Groq HTTP clients
 
 # ── Config ─────────────────────────────────────────────────────
-python-dotenv>=1.0.0      # Loads .env settings
+python-dotenv==1.2.2      # Loads .env settings
 
 # ── Commands (apps, screenshots) ───────────────────────────────
-pyautogui>=0.9.54         # Screenshots
-pillow>=10.0.0            # pyautogui dependency
+pyautogui==0.9.54         # Screenshots
+pillow==12.3.0            # pyautogui dependency
 
 # ── Volume control (optional — "increase volume" etc.) ─────────
 # If these are missing JARVIS reports the command as unavailable
 # instead of pretending it worked.
-pycaw>=0.0.13             # Windows Core Audio volume control
-comtypes>=1.2.0           # pycaw dependency (COM bindings)
+pycaw==20251023           # Windows Core Audio volume control
+comtypes==1.4.16          # pycaw dependency (COM bindings)
 
 # ── Terminal UI / misc ─────────────────────────────────────────
-rich>=13.0.0              # Optional rich dashboard (utils/terminal_ui.py)
+rich==15.0.0              # Live terminal dashboard (utils/terminal_ui.py)
 
 # ── Fallbacks / compatibility ──────────────────────────────────
-SpeechRecognition>=3.10.0 # Compatibility wrapper only (STT is local Whisper)
-pyttsx3>=2.90             # Fallback TTS (TTS_ENGINE=pyttsx3, Windows SAPI5)
+SpeechRecognition==3.17.0 # Compatibility wrapper only (STT is local Whisper)
+pyttsx3==2.99             # Fallback TTS (TTS_ENGINE=pyttsx3, Windows SAPI5)

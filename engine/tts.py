@@ -129,6 +129,15 @@ class PiperBackend:
         sd.play(audio, self.rate)
         sd.wait()
 
+    def interrupt(self) -> None:
+        """Stop any audio currently playing (non-blocking)."""
+        try:
+            import sounddevice as sd
+
+            sd.stop()
+        except Exception as e:
+            logger.debug(f"TTS interrupt failed: {e}")
+
 
 class Pyttsx3Backend:
     """pyttsx3 (Windows SAPI5) fallback backend."""
@@ -175,6 +184,12 @@ class TTSEngine:
         # ``backend`` is injected by tests to avoid real audio.
         self._backend = backend if backend is not None else self._make_backend()
         self._queue: queue.Queue = queue.Queue()
+
+        # Generation counter: every stop() bumps it, and any utterance
+        # queued under an older generation is skipped by the worker, so
+        # cancelled speech can never play after an interrupt.
+        self._generation = 0
+        self._gen_lock = threading.Lock()
 
         self._worker = threading.Thread(
             target=self._worker_loop,
@@ -224,7 +239,7 @@ class TTSEngine:
     def _worker_loop(self) -> None:
         """Consume the queue forever, speaking one sentence at a time."""
         while True:
-            text, done_event = self._queue.get()
+            text, done_event, generation = self._queue.get()
 
             if text is None:
                 # wait() sentinel — nothing to say, just signal completion.
@@ -232,6 +247,14 @@ class TTSEngine:
                     done_event.set()
                 continue
             if text == _STOP:
+                if done_event is not None:
+                    done_event.set()
+                continue
+
+            # A stop() happened after this item was queued — skip it.
+            if generation != self._current_generation():
+                if done_event is not None:
+                    done_event.set()
                 continue
 
             try:
@@ -252,6 +275,10 @@ class TTSEngine:
             if done_event is not None:
                 done_event.set()
 
+    def _current_generation(self) -> int:
+        with self._gen_lock:
+            return self._generation
+
     # ── Public API ────────────────────────────────────────────
 
     def speak(self, text: str) -> None:
@@ -265,7 +292,7 @@ class TTSEngine:
 
         # The console always shows the raw reply; only the audio gets cleaned.
         print(f"[JARVIS] {text}")
-        self._queue.put((clean_for_speech(text), None))
+        self._queue.put((clean_for_speech(text), None, self._current_generation()))
 
     def speak_blocking(self, text: str) -> None:
         """
@@ -278,30 +305,42 @@ class TTSEngine:
 
         print(f"[JARVIS] {text}")
         done_event = threading.Event()
-        self._queue.put((clean_for_speech(text), done_event))
+        self._queue.put(
+            (clean_for_speech(text), done_event, self._current_generation())
+        )
         done_event.wait()
 
     def stop(self) -> None:
         """
-        Clear queued (unspoken) sentences and interrupt the sentence
-        currently being spoken. Best-effort: if the underlying engine
-        cannot be interrupted, the current sentence simply finishes.
+        Interrupt speech: drop queued (unspoken) sentences, cancel the
+        sentence currently being spoken, and unblock any waiters.
+
+        A generation bump guarantees nothing queued before the stop can
+        ever be spoken afterwards (even if the worker already picked it
+        up). pyttsx3 (Windows SAPI) cannot be interrupted mid-sentence
+        — its current sentence simply finishes, then it stops.
         """
-        # Drop everything still waiting to be spoken.
+        with self._gen_lock:
+            self._generation += 1
+
+        # Drop everything still waiting to be spoken, signalling any
+        # speak_blocking() waiters so they never hang.
         while True:
             try:
-                self._queue.get_nowait()
+                _text, done_event, _gen = self._queue.get_nowait()
             except queue.Empty:
                 break
+            if done_event is not None:
+                done_event.set()
 
-        # Interrupt active Piper playback immediately.
+        # Interrupt active playback immediately (Piper path).
         if self.engine_name != "pyttsx3":
-            try:
-                import sounddevice as sd
-
-                sd.stop()
-            except Exception:
-                pass
+            interrupt = getattr(self._backend, "interrupt", None)
+            if interrupt is not None:
+                try:
+                    interrupt()
+                except Exception:
+                    pass
 
     def wait(self) -> None:
         """
@@ -310,5 +349,5 @@ class TTSEngine:
         its own voice (echo).
         """
         done_event = threading.Event()
-        self._queue.put((None, done_event))
+        self._queue.put((None, done_event, self._current_generation()))
         done_event.wait()
