@@ -17,6 +17,7 @@ never stores secrets (only the conversation turns themselves).
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import List, Dict
@@ -93,6 +94,7 @@ class ConversationMemory:
         else:
             self._persist_path = None
 
+        self._lock = threading.RLock()
         self._messages: List[Message] = []
         self._load()
         logger.info(
@@ -105,27 +107,40 @@ class ConversationMemory:
         """Add a user message to history."""
         if not content or not content.strip():
             return
-        self._messages.append({
-            "role": "user",
-            "content": content.strip()
-        })
-        self._enforce_limit()
+        with self._lock:
+            self._messages.append({
+                "role": "user",
+                "content": content.strip()
+            })
+            self._enforce_limit()
         self._save()
 
     def add_assistant_message(self, content: str) -> None:
         """Add an assistant (JARVIS) response to history."""
         if not content or not content.strip():
             return
-        self._messages.append({
-            "role": "assistant",
-            "content": content.strip()
-        })
-        self._enforce_limit()
+        with self._lock:
+            self._messages.append({
+                "role": "assistant",
+                "content": content.strip()
+            })
+            self._enforce_limit()
         self._save()
 
+    def pop_last(self) -> Message | None:
+        """
+        Remove and return the most recent message (used to roll back a
+        failed interaction). Returns None when empty. Thread-safe.
+        """
+        with self._lock:
+            if not self._messages:
+                return None
+            return self._messages.pop()
+
     def get_history(self) -> List[Message]:
-        """Return full conversation history."""
-        return list(self._messages)
+        """Return a snapshot of the conversation history (thread-safe)."""
+        with self._lock:
+            return list(self._messages)
 
     def get_context_for_ollama(
         self, system_prompt: str
@@ -149,10 +164,13 @@ class ConversationMemory:
         Returns a new list, so callers can safely modify it (e.g.
         appending the current user message).
         """
+        with self._lock:
+            history = list(self._messages)
+
         messages: List[Message] = [
             {"role": "system", "content": system_prompt}
         ]
-        messages.extend(self._messages)
+        messages.extend(history)
 
         if self.max_chars > 0:
             total = sum(len(m["content"]) for m in messages)
@@ -171,7 +189,8 @@ class ConversationMemory:
 
     def clear(self) -> None:
         """Clear all conversation history (persisted immediately)."""
-        self._messages.clear()
+        with self._lock:
+            self._messages.clear()
         self._save()
         logger.info("Conversation memory cleared.")
 
@@ -255,7 +274,7 @@ class ConversationMemory:
         """
         Remove oldest turn when memory exceeds max_turns.
         Always removes in pairs (user + assistant) to keep
-        history coherent.
+        history coherent. Caller must hold ``self._lock``.
         """
         max_messages = self.max_turns * 2
         while len(self._messages) > max_messages:
@@ -266,7 +285,8 @@ class ConversationMemory:
             logger.debug("Dropped oldest turn from memory.")
 
     def __len__(self) -> int:
-        return len(self._messages)
+        with self._lock:
+            return len(self._messages)
 
     def __repr__(self) -> str:
         turns = len(self._messages) // 2

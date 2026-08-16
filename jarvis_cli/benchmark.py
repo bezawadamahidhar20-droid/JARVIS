@@ -35,6 +35,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -46,6 +47,95 @@ logger = get_logger("benchmark")
 # ── Models to compare ─────────────────────────────────────────
 # Override with BENCHMARK_MODELS="qwen3:8b,qwen3:1.7b" in .env.
 DEFAULT_MODELS = ["qwen3:8b", "qwen3:1.7b", "llama3.2:3b"]
+
+# Where baseline results are saved/compared (project data dir,
+# gitignored). A regression is reported when a model's average total
+# time is >1.2x its baseline.
+BASELINE_PATH = Path("outputs") / "benchmark_baseline.json"
+REGRESSION_RATIO = 1.2
+
+
+def _summary_key(summary: dict) -> dict:
+    """The measurable slice of a summary used for baseline comparison."""
+    return {
+        "total": summary.get("total", 0.0),
+        "ttft": summary.get("ttft", 0.0),
+        "tokens_per_sec": summary.get("tokens_per_sec", 0.0),
+        "quality": summary.get("quality", 0.0),
+    }
+
+
+def save_baseline(summaries: list[dict], path: str | Path | None = None) -> Path:
+    """Persist the current benchmark as the new baseline."""
+    target = Path(path) if path is not None else BASELINE_PATH
+    data = {
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "models": {
+            s["model"]: _summary_key(s) for s in summaries
+        },
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    logger.info(f"Baseline saved to {target}")
+    return target
+
+
+def load_baseline(path: str | Path | None = None) -> dict:
+    """Load the saved baseline ({} when missing/corrupt — never raises)."""
+    target = Path(path) if path is not None else BASELINE_PATH
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        models = raw.get("models", {}) if isinstance(raw, dict) else {}
+        return {k: v for k, v in models.items() if isinstance(v, dict)}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def compare_baseline(
+    summaries: list[dict],
+    path: str | Path | None = None,
+) -> list[dict]:
+    """
+    Compare the current run against the saved baseline.
+
+    Returns a list of regression dicts {model, ratio, baseline_total,
+    current_total} where current total > REGRESSION_RATIO x baseline.
+    Pure function — easy to unit test without Ollama.
+    """
+    baseline = load_baseline(path)
+    if not baseline:
+        return []
+    regressions: list[dict] = []
+    for s in summaries:
+        prev = baseline.get(s["model"])
+        if not prev:
+            continue
+        prev_total = float(prev.get("total", 0.0) or 0.0)
+        cur_total = float(s.get("total", 0.0) or 0.0)
+        if prev_total <= 0:
+            continue
+        ratio = cur_total / prev_total
+        if ratio > REGRESSION_RATIO:
+            regressions.append({
+                "model": s["model"],
+                "ratio": ratio,
+                "baseline_total": prev_total,
+                "current_total": cur_total,
+            })
+    return regressions
+
+
+def print_regressions(regressions: list[dict]) -> None:
+    """Print a CI-friendly warning for each latency regression."""
+    if not regressions:
+        return
+    print("\n  ⚠  LATENCY REGRESSIONS vs baseline:")
+    for r in regressions:
+        print(
+            f"    {r['model']:<14} {r['ratio']:.1f}x slower "
+            f"({r['baseline_total']:.1f}s -> {r['current_total']:.1f}s)"
+        )
+    print("    (Run with --save-baseline to accept current timings.)")
 
 
 def _benchmark_models() -> list[str]:
@@ -413,7 +503,7 @@ def _is_installed(model: str, installed: list[str]) -> bool:
     return model.endswith(":latest") and model[: -len(":latest")] in installed
 
 
-def run_benchmark(verbose: bool = False) -> int:
+def run_benchmark(verbose: bool = False, save_baseline: bool = False) -> int:
     """Run the full model benchmark. Returns 0 on success."""
     print("\n=============================================")
     print("      JARVIS MODEL BENCHMARK (CPU)")
@@ -453,6 +543,14 @@ def run_benchmark(verbose: bool = False) -> int:
 
     print_table(summaries)
     print_quality(summaries)
+
+    if save_baseline:
+        save_baseline(summaries)
+        print(f"\n  Baseline saved to {BASELINE_PATH}.")
+    else:
+        regressions = compare_baseline(summaries)
+        print_regressions(regressions)
+
     rec = recommend(summaries)
     if rec is not None:
         print_recommendation(rec, summaries)

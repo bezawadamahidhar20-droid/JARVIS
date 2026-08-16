@@ -23,6 +23,7 @@ Security model (see README):
 
 import inspect
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -40,9 +41,11 @@ try:
 
     OWNER = jarvis_config.OWNER
     CONFIRMATION_TIMEOUT = jarvis_config.CONFIRMATION_TIMEOUT
+    CONFIRMATION_REQUIRE_TOKEN = jarvis_config.CONFIRMATION_REQUIRE_TOKEN
 except Exception:
     OWNER = "Sir"
     CONFIRMATION_TIMEOUT = 30
+    CONFIRMATION_REQUIRE_TOKEN = False
 
 
 # ── Command patterns ────────────────────────────────────────────────────────
@@ -165,6 +168,11 @@ class PendingConfirmation:
         executed later.
       * All transitions are guarded by a lock, so concurrent inputs
         cannot race the pending state.
+      * Each confirmation carries a random nonce (``token``). With
+        ``require_token`` enabled (CONFIRMATION_REQUIRE_TOKEN=true) the
+        user must echo that code back before the command executes, so a
+        stray "yes" from a second process or an injected stdin write
+        can never authorize a destructive action.
 
     The caller clears its reference on every terminal outcome
     (success, rejection, timeout, exception) — see main.py.
@@ -175,6 +183,7 @@ class PendingConfirmation:
         result: CommandResult,
         original_text: str,
         timeout: float | None = None,
+        require_token: bool | None = None,
     ) -> None:
         self.result = result
         self.original_text = original_text
@@ -182,9 +191,28 @@ class PendingConfirmation:
         self.timeout = (
             timeout if timeout is not None else float(CONFIRMATION_TIMEOUT)
         )
+        # Random nonce binding this specific confirmation to the reply.
+        # secrets.token_hex(4) = 8 hex chars (~32 bits of entropy).
+        self.token = secrets.token_hex(4)
+        self.require_token = (
+            require_token if require_token is not None
+            else bool(CONFIRMATION_REQUIRE_TOKEN)
+        )
         self._created = time.monotonic()
         self._lock = threading.Lock()
         self._consumed = False
+
+    @property
+    def prompt(self) -> str:
+        """The spoken confirmation prompt, including the nonce when
+        token confirmation is required."""
+        base = self.result.confirm_prompt
+        if self.require_token:
+            return (
+                f"{base} Say the code {self.token} to confirm, "
+                "or say no."
+            )
+        return base
 
     @property
     def is_expired(self) -> bool:
@@ -192,6 +220,32 @@ class PendingConfirmation:
         if self.timeout <= 0:
             return False
         return (time.monotonic() - self._created) > self.timeout
+
+    def confirm(self, decision: str, token: str | None = None) -> bool:
+        """
+        True when the reply authorizes execution of the pending action.
+
+        Args:
+            decision: "yes" | "no" | "other" (from main._confirm_decision)
+            token:    the code the user echoed back. Required when
+                      ``require_token`` is on; ignored otherwise.
+
+        * Without token confirmation: only an explicit "yes" authorizes.
+        * With token confirmation: echoing the correct code authorizes
+          (the code IS the affirmative); an explicit "no" still wins.
+
+        Never returns True after the timeout or after ``take()`` has
+        claimed the action.
+        """
+        if self.is_expired or self._consumed:
+            return False
+        if self.require_token:
+            if not token or not secrets.compare_digest(
+                token.strip().lower(), self.token.lower()
+            ):
+                return False
+            return decision != "no"
+        return decision == "yes"
 
     def take(self) -> tuple[CommandResult, str] | None:
         """

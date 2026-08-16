@@ -60,8 +60,9 @@ def test_doctor_dispatches(monkeypatch, capsys):
 def test_benchmark_models_dispatches(monkeypatch):
     calls = {}
 
-    def fake_benchmark(verbose=False):
+    def fake_benchmark(verbose=False, save_baseline=False):
         calls["verbose"] = verbose
+        calls["save_baseline"] = save_baseline
         return 0
 
     monkeypatch.setattr(
@@ -69,6 +70,21 @@ def test_benchmark_models_dispatches(monkeypatch):
     )
     assert main(["--benchmark-models", "--debug"]) == 0
     assert calls["verbose"] is True
+    assert calls["save_baseline"] is False
+
+
+def test_benchmark_save_baseline_flag(monkeypatch):
+    calls = {}
+
+    def fake_benchmark(verbose=False, save_baseline=False):
+        calls["save_baseline"] = save_baseline
+        return 0
+
+    monkeypatch.setattr(
+        "jarvis_cli.benchmark.run_benchmark", fake_benchmark
+    )
+    assert main(["--benchmark-models", "--save-baseline"]) == 0
+    assert calls["save_baseline"] is True
 
 
 def test_hardware_dispatches(monkeypatch):

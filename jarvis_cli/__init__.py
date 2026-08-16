@@ -76,6 +76,14 @@ def _build_parser():
         ),
     )
     parser.add_argument(
+        "--save-baseline", action="store_true",
+        help=(
+            "with --benchmark-models: save this run as the latency "
+            "baseline (outputs/benchmark_baseline.json); future runs "
+            "warn when a model is >1.2x slower than it"
+        ),
+    )
+    parser.add_argument(
         "--hardware", action="store_true",
         help="show a read-only CPU / RAM / GPU / Ollama report",
     )
@@ -128,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.benchmark_models:
         from jarvis_cli.benchmark import run_benchmark
 
-        return run_benchmark(verbose=args.debug)
+        return run_benchmark(
+            verbose=args.debug,
+            save_baseline=args.save_baseline,
+        )
 
     if args.hardware:
         from jarvis_cli.hardware import run_hardware

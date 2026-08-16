@@ -52,9 +52,21 @@ def _configure_root() -> None:
     _console_handler = console
 
     # ── File handler (always DEBUG) ──
+    # RotatingFileHandler keeps the log bounded: 10 MB per file, 5
+    # backups (jarvis.log.1 .. .5), so a long-running install (e.g.
+    # --startup enable at login) can never exhaust the disk. On a busy
+    # session with VAD_VERBOSE=true the log grows ~50 MB/day, so
+    # rotation caps total usage at ~60 MB.
     try:
+        from logging.handlers import RotatingFileHandler
+
         log_path = Path(__file__).parent.parent / "jarvis.log"
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,               # jarvis.log.1 .. .5
+            encoding="utf-8",
+        )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(
             logging.Formatter(

@@ -18,6 +18,7 @@ import subprocess
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 from utils.logger import get_logger
 
@@ -74,8 +75,11 @@ def _startfile(path: str) -> None:
 
 # ── Lookup tables ─────────────────────────────────────────────────────────────
 
-# Spoken name -> website URL.
-WEBSITES: dict[str, str] = {
+# Spoken name -> website URL. Frozen (MappingProxyType) so no runtime
+# code — nor anything importing this module — can mutate the trusted
+# registry after import (command hijacking via registry mutation is
+# impossible).
+WEBSITES: MappingProxyType = MappingProxyType({
     "youtube": "https://www.youtube.com",
     "google": "https://www.google.com",
     "github": "https://github.com",
@@ -93,12 +97,12 @@ WEBSITES: dict[str, str] = {
     "netflix": "https://www.netflix.com",
     "amazon": "https://www.amazon.com",
     "linkedin": "https://www.linkedin.com",
-}
+})
 
-# Spoken name -> how to launch it.
+# Spoken name -> how to launch it. Frozen — see WEBSITES.
 # A value ending in ".exe" is launched via PATH lookup (subprocess.Popen);
 # anything else is treated as a shell URI for os.startfile (ms-settings: etc).
-APPS: dict[str, str] = {
+APPS: MappingProxyType = MappingProxyType({
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
     "calc": "calc.exe",
@@ -123,7 +127,7 @@ APPS: dict[str, str] = {
     "visual studio code": "code.exe",
     "vs code": "code.exe",
     "photos": "ms-photos:",
-}
+})
 
 # ── Fuzzy matching (speech-recognition misspellings) ────────────────────────
 # "open chrom" should resolve to Chrome; "open youtbe" to YouTube. We only
@@ -148,14 +152,15 @@ def fuzzy_match_target(target: str, registry: dict, cutoff: float = _FUZZY_CUTOF
     return matches[0] if matches else None
 
 # Spoken name -> Windows known-folder key (resolved with SHGetKnownFolderPath).
-FOLDERS: dict[str, str] = {
+# Frozen — see WEBSITES.
+FOLDERS: MappingProxyType = MappingProxyType({
     "downloads": "downloads",
     "documents": "documents",
     "desktop": "desktop",
     "pictures": "pictures",
     "videos": "videos",
     "music": "music",
-}
+})
 
 # Vocabulary exposed to the intent router so router and registry never drift.
 APP_NAMES: tuple[str, ...] = tuple(APPS.keys())
@@ -434,6 +439,19 @@ class SystemCommands:
         """Launch a Windows application."""
         try:
             if command.lower().endswith(".exe"):
+                # Absolute paths (e.g. chrome.exe resolved to its install
+                # location) are checked up front so a missing binary gets
+                # a clear "not installed" reply instead of a raw error.
+                # Relative names (notepad.exe) are resolved via PATH and
+                # only fail inside Popen.
+                if os.path.isabs(command) and not os.path.isfile(command):
+                    logger.error(
+                        f"Application not found: {command}"
+                    )
+                    return (
+                        f"I couldn't find {spoken_name} on this machine. "
+                        "It may not be installed."
+                    )
                 subprocess.Popen(command)
             else:
                 _startfile(command)  # e.g. ms-settings:, ms-photos:

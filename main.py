@@ -20,6 +20,7 @@ unavailable JARVIS still runs — local commands keep working and a
 friendly "offline" message is spoken for AI questions.
 """
 
+import asyncio
 import inspect
 import re
 import sys
@@ -27,17 +28,12 @@ import time
 import threading
 
 # ── Config ────────────────────────────────────────────────────
-from config import jarvis_config, ollama_config, tts_config
-
-# ── Engine ────────────────────────────────────────────────────
-from engine.microphone import MicrophoneManager
-from engine.stt import STTEngine
-from engine.tts import TTSEngine
+from config import jarvis_config, ollama_config
 
 # ── Brain ─────────────────────────────────────────────────────
-from brain.memory import ConversationMemory
-from brain.llm import create_provider
-from brain.router import IntentRouter, Intent, validate_input
+from brain.router import Intent, validate_input
+from brain.exceptions import OllamaTimeoutError
+from brain.llm import stream_sentences_async
 from brain.search import (
     build_search_query,
     filter_and_rank,
@@ -45,7 +41,22 @@ from brain.search import (
 )
 
 # ── Commands ──────────────────────────────────────────────────
-from commands.registry import CommandRegistry, PendingConfirmation
+from commands.registry import PendingConfirmation
+
+# ── Dependency injection ──────────────────────────────────────
+from di import (
+    COMMANDS,
+    MEMORY,
+    MIC,
+    PROVIDER,
+    ROUTER,
+    SEARCH,
+    STT,
+    TTS,
+    UI,
+    DependencyContainer,
+    build_default_container,
+)
 
 # ── Utils ─────────────────────────────────────────────────────
 from utils.logger import get_logger, set_debug
@@ -109,6 +120,7 @@ class JARVIS:
         debug: bool = False,
         benchmark: bool = False,
         components: dict | None = None,
+        container: DependencyContainer | None = None,
     ):
         mode = "TEXT MODE" if text_mode else "VOICE MODE"
         print("\n=============================================")
@@ -123,51 +135,47 @@ class JARVIS:
         self.debug = debug
         self.benchmark = benchmark
 
-        # Allow tests to inject fakes for every subsystem.
-        components = components or {}
+        # Dependency injection: a container builds every subsystem
+        # lazily; ``components`` remains a back-compat way to inject
+        # fakes (applied as container overrides).
+        self.container = container or build_default_container(debug=debug)
+        for key, value in (components or {}).items():
+            self.container.override(key, value)
 
         # Audio pipeline
-        self.mic = components.get("mic") or MicrophoneManager()
-        self.stt = components.get("stt") or STTEngine(self.mic)
-        self.tts = components.get("tts") or TTSEngine(rate=tts_config.RATE)
+        self.mic = self.container.get(MIC)
+        self.stt = self.container.get(STT)
+        self.tts = self.container.get(TTS)
 
-        # AI brain (provider-agnostic). NOTE: `or` would be wrong here —
-        # an empty ConversationMemory is falsy (it defines __len__).
-        memory_component = components.get("memory")
-        self.memory = (
-            memory_component if memory_component is not None
-            else ConversationMemory()
-        )
-        self.provider = components.get("provider")
-        if self.provider is None:
-            try:
-                self.provider = create_provider()
-            except Exception as e:
-                logger.warning(
-                    f"AI provider unavailable at startup: {e}"
-                )
-                self.provider = None
+        # AI brain (provider-agnostic)
+        self.memory = self.container.get(MEMORY)
+        self.provider = self.container.get(PROVIDER)
 
         # Web search (current-information answers)
-        if "search" in components:
-            self.search = components["search"]
-        else:
-            try:
-                from brain.search import create_search_provider
-
-                self.search = create_search_provider()
-            except Exception as e:
-                logger.warning(f"Web search unavailable: {e}")
-                self.search = None
+        self.search = self.container.get(SEARCH)
 
         # Routing and commands
-        self.router = components.get("router") or IntentRouter()
-        self.commands = components.get("commands") or CommandRegistry()
+        self.router = self.container.get(ROUTER)
+        self.commands = self.container.get(COMMANDS)
 
         # Pending CONFIRM-permission command (shutdown/restart/sleep).
         # PendingConfirmation enforces an expiry window so a stale "yes"
         # can never execute a command; None when idle.
         self._pending: PendingConfirmation | None = None
+
+        # Async-first orchestration: a dedicated event loop + daemon
+        # thread runs the whole pipeline. Sync entry points (process_input,
+        # run, ...) submit coroutines to it and block on the result, so
+        # tests and the GUI keep working while the pipeline itself is
+        # fully cooperative (concurrent search + TTS, cancellable
+        # streaming, barge-in).
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever,
+            name="jarvis-asyncio",
+            daemon=True,
+        )
+        self._loop_thread.start()
 
         self.running = False
 
@@ -180,9 +188,7 @@ class JARVIS:
         # interface). Only created when rich is importable.
         self.ui = None
         try:
-            from utils.terminal_ui import TerminalUI
-
-            self.ui = TerminalUI(debug=debug)
+            self.ui = self.container.get(UI)
         except Exception as e:
             logger.debug(f"Terminal dashboard unavailable: {e}")
         self.ollama_ok = self._check_provider()
@@ -194,6 +200,16 @@ class JARVIS:
         self._warmup_done = threading.Event()
         self._start_warmup()
         logger.info("JARVIS initialized successfully.")
+
+    # ── Async plumbing ────────────────────────────────────────
+
+    def _run_coro(self, coro):
+        """Run an async pipeline step on the dedicated loop, blocking the
+        caller until it finishes. Safe from any thread."""
+        if self._loop.is_closed():
+            return asyncio.run(coro)
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
 
     # ── Provider helpers ──────────────────────────────────────
 
@@ -260,6 +276,14 @@ class JARVIS:
         if self._warmup_thread is not None and self._warmup_thread.is_alive():
             logger.debug("Waiting for model warm-up to finish...")
             self._warmup_done.wait(timeout=timeout)
+
+    async def _await_warmup(self, timeout: float = 120.0) -> None:
+        """Async warm-up coordination: cooperatively wait for the
+        background model load without blocking the event loop. The
+        blocking wait runs on a worker thread."""
+        if self._warmup_thread is not None and self._warmup_thread.is_alive():
+            logger.debug("Waiting for model warm-up to finish...")
+            await asyncio.to_thread(self._warmup_done.wait, timeout)
 
     # ── Initialization ────────────────────────────────────────
 
@@ -408,9 +432,17 @@ class JARVIS:
     # ── Handlers ──────────────────────────────────────────────
 
     def handle_ai_question(self, user_input: str) -> None:
+        """Sync façade: run the async AI pipeline on the event loop."""
+        self._run_coro(self.ahandle_ai_question(user_input))
+
+    async def ahandle_ai_question(self, user_input: str) -> None:
         """
-        Send question to the AI provider.
+        Send question to the AI provider (async).
         Updates memory before and after for context tracking.
+
+        In voice mode the response is streamed sentence-by-sentence:
+        each finished sentence is spoken while the rest is still
+        generating, and the whole stream is cancellable (barge-in).
         """
         if self.provider is None or not self.ollama_ok:
             logger.error("AI provider not available.")
@@ -418,7 +450,7 @@ class JARVIS:
             return
 
         # Cold-start: never race the background model load.
-        self._wait_for_warmup()
+        await self._await_warmup()
 
         # Add to memory BEFORE asking
         self.memory.add_user_message(user_input)
@@ -426,16 +458,29 @@ class JARVIS:
         print("[Thinking...]")
         t0 = time.perf_counter()
 
-        if self.text_mode:
-            response = self.provider.ask(user_input, self.memory)
-        else:
-            # Stream: each finished sentence is spoken immediately
-            # while the rest of the answer is still generating.
-            response = self.provider.ask_stream(
-                user_input,
-                self.memory,
-                on_sentence=self.tts.speak,
-            )
+        try:
+            if self.text_mode:
+                # Blocking I/O offloaded so the event loop stays free.
+                response = await asyncio.to_thread(
+                    self.provider.ask, user_input, self.memory
+                )
+            else:
+                # Stream: each finished sentence is spoken immediately
+                # while the rest of the answer is still generating.
+                response = await self._stream_response(user_input)
+        except OllamaTimeoutError as e:
+            logger.error(f"AI provider timed out: {e}")
+            self.memory.pop_last()
+            self.speak(ERROR_AI_FAILED)
+            return
+        except Exception as e:
+            # A genuine provider bug must not be silently swallowed —
+            # log the full traceback, roll back the memory, and tell
+            # the user something went wrong.
+            logger.exception(f"AI provider error: {e}")
+            self.memory.pop_last()
+            self.speak(ERROR_AI_FAILED)
+            return
 
         logger.debug(
             f"[timing] interaction {(time.perf_counter() - t0):.1f}s"
@@ -448,15 +493,56 @@ class JARVIS:
                 self.speak(response)
         else:
             # Remove failed user message from memory
-            if self.memory._messages:  # noqa: SLF001
-                self.memory._messages.pop()  # noqa: SLF001
+            self.memory.pop_last()
             self.speak(ERROR_AI_FAILED)
+
+    async def _stream_response(
+        self,
+        user_input: str,
+        context: str | None = None,
+    ) -> str | None:
+        """
+        Stream the provider's response sentence-by-sentence, speaking
+        each one as it completes (voice mode). Returns the full text.
+
+        Uses the provider's native async stream when available and
+        bridges the sync stream otherwise — the event loop is never
+        blocked either way. ``context`` (verified web results) is only
+        forwarded to providers that accept it.
+        """
+        kwargs: dict = {}
+        if context:
+            stream_fn = getattr(
+                self.provider, "ask_stream_async", None
+            ) or getattr(self.provider, "ask_stream", None)
+            if stream_fn is not None:
+                try:
+                    if "context" in inspect.signature(stream_fn).parameters:
+                        kwargs["context"] = context
+                except (TypeError, ValueError):
+                    pass
+
+        parts: list[str] = []
+        async for sentence in stream_sentences_async(
+            self.provider, user_input, self.memory, **kwargs
+        ):
+            parts.append(sentence)
+            if sentence:
+                self.speak(sentence)
+        full = " ".join(p for p in parts if p).strip()
+        return full or None
 
     # ── Web search (current information) ──────────────────────
 
     def handle_web_search(self, user_input: str) -> None:
+        """Sync façade: run the async web-search pipeline on the loop."""
+        self._run_coro(self.ahandle_web_search(user_input))
+
+    async def ahandle_web_search(self, user_input: str) -> None:
         """
-        Answer a current-information question from verified web results.
+        Answer a current-information question from verified web results
+        (async). The blocking search HTTP call runs on a worker thread,
+        so the event loop stays free to speak/stream concurrently.
 
         Never silently falls back to a stale LLM answer: if the search
         is not configured, fails, or finds nothing usable, JARVIS says
@@ -472,15 +558,22 @@ class JARVIS:
 
         # Cold-start: never race the background model load (the
         # grounded answer also needs the model).
-        self._wait_for_warmup()
+        await self._await_warmup()
 
         print("[Searching...]")
         query = build_search_query(user_input)
         t_search = time.perf_counter()
         try:
-            results = self.search.search(query, self.search.max_results)
+            # I/O-bound search offloaded; the loop stays responsive.
+            results = await asyncio.to_thread(
+                self.search.search, query, self.search.max_results
+            )
         except Exception as e:
-            logger.error(f"Web search failed: {e}")
+            # Expected failures (timeouts, rate limits, network blips)
+            # log a one-liner; unexpected bugs log the full traceback so
+            # they are never silently hidden. Either way the user gets
+            # the honest "couldn't verify" — never a stale guess.
+            logger.exception(f"Web search failed: {e}")
             self.speak(ERROR_CANNOT_VERIFY)
             return
         logger.debug(
@@ -511,16 +604,14 @@ class JARVIS:
         t0 = time.perf_counter()
 
         if self.text_mode:
-            response = self._provider_ask(
-                user_input, self.memory, context=context
+            # ``_provider_ask`` forwards context only when the provider
+            # accepts it (older/fake providers stay compatible).
+            response = await asyncio.to_thread(
+                self._provider_ask, user_input, self.memory, context=context
             )
         else:
-            response = self._provider_ask(
-                user_input,
-                self.memory,
-                context=context,
-                stream=True,
-                on_sentence=self.tts.speak,
+            response = await self._stream_response(
+                user_input, context=context
             )
 
         logger.debug(
@@ -533,8 +624,7 @@ class JARVIS:
             if self.text_mode:
                 self.speak(response)
         else:
-            if self.memory._messages:  # noqa: SLF001
-                self.memory._messages.pop()  # noqa: SLF001
+            self.memory.pop_last()
             self.speak(ERROR_CANNOT_VERIFY)
 
     def _answer_from_snippet(self, result) -> None:
@@ -610,7 +700,7 @@ class JARVIS:
             return
         if result.needs_confirmation:
             self._pending = PendingConfirmation(result, user_input)
-            self.speak(result.confirm_prompt)
+            self.speak(self._pending.prompt)
             return
         if result.response:
             self.speak(result.response)
@@ -692,7 +782,17 @@ class JARVIS:
 
     def process_input(self, user_input: str) -> bool:
         """
-        Process one user input through the full pipeline.
+        Process one user input through the full pipeline (sync façade).
+
+        Returns:
+            False = exit JARVIS
+            True  = continue running
+        """
+        return self._run_coro(self._aprocess_input(user_input))
+
+    async def _aprocess_input(self, user_input: str) -> bool:
+        """
+        Process one user input through the full async pipeline.
 
         Returns:
             False = exit JARVIS
@@ -719,17 +819,28 @@ class JARVIS:
         # A CONFIRM command (shutdown/restart/sleep) is pending — the
         # next input must answer it before anything else is processed.
         if self._pending is not None:
-            if self._pending.is_expired:
+            pending = self._pending
+            if pending.is_expired:
                 # Stale confirmation: cancel it, never execute.
                 logger.info("Pending confirmation expired; cancelling.")
                 self._pending = None
                 self.speak(ERROR_CONFIRMATION_TIMED_OUT)
             else:
                 decision = self._confirm_decision(user_input)
-                if decision == "yes":
+                # Token confirmations: the user may answer with the
+                # nonce code itself ("a3f2") or with it embedded in a
+                # phrase ("a3f2, yes"). Echoing the code is what binds
+                # THIS confirmation to THIS reply.
+                echoed_token = None
+                if pending.require_token and pending.token:
+                    lowered = (user_input or "").lower()
+                    if pending.token.lower() in lowered:
+                        echoed_token = pending.token
+                authorized = pending.confirm(decision, echoed_token)
+                if authorized:
                     # take() claims the action exactly once — a second
                     # "yes" cannot re-execute it.
-                    claimed = self._pending.take()
+                    claimed = pending.take()
                     self._pending = None
                     if claimed is not None:
                         result, original = claimed
@@ -745,8 +856,8 @@ class JARVIS:
                         f"Understood, {jarvis_config.OWNER}. I won't."
                     )
                     return True
-                # Not a clear yes/no — drop the pending action and treat
-                # this as a fresh request.
+                # Not a clear yes/no (and no valid nonce) — drop the
+                # pending action and treat this as a fresh request.
                 self._pending = None
 
         # Route the input to correct handler
@@ -758,9 +869,12 @@ class JARVIS:
             return True
 
         if intent == Intent.EXIT:
-            self.speak_blocking(
+            # Farewell speech is blocking I/O — offload it so the loop
+            # stays responsive until shutdown.
+            await asyncio.to_thread(
+                self.speak_blocking,
                 f"Goodbye, {jarvis_config.OWNER}. "
-                "JARVIS shutting down."
+                "JARVIS shutting down.",
             )
             return False
 
@@ -785,15 +899,83 @@ class JARVIS:
             # Current-information question — answer from fresh search
             # results, never from the model's stale training data.
             self._ui_state("thinking", "searching the web")
-            self.handle_web_search(cleaned or user_input)
+            await self.ahandle_web_search(cleaned or user_input)
 
         else:
             # AI_QUESTION or UNKNOWN — send to the AI provider.
             self._ui_state("thinking", "consulting the brain")
-            self.handle_ai_question(user_input)
+            await self.ahandle_ai_question(user_input)
 
         self._ui_state("idle")
         return True
+
+    # ── Barge-in / wake word / streaming STT ──────────────────
+
+    def _start_barge_in(self):
+        """Start the barge-in monitor when enabled (opt-in: needs a
+        quiet room / echo handling). Returns the monitor or None."""
+        if not jarvis_config.ENABLE_BARGE_IN:
+            return None
+        vad = getattr(self.stt, "vad", None)
+        if vad is None:
+            return None
+        try:
+            from engine.barge_in import BargeInMonitor
+
+            monitor = BargeInMonitor(
+                sample_rate=getattr(vad, "sample_rate", 16000),
+                threshold=getattr(vad, "threshold", 500.0),
+                input_device=getattr(vad, "input_device", None),
+            )
+            monitor.start(on_speech=self.tts.stop)
+            return monitor
+        except Exception as e:
+            logger.debug(f"Barge-in monitor unavailable: {e}")
+            return None
+
+    async def _await_wake_word(self) -> None:
+        """Cooperatively wait for the wake word (when enabled). Never
+        blocks the event loop; falls back silently when the optional
+        openwakeword package/model is unavailable."""
+        if not jarvis_config.ENABLE_WAKE_WORD:
+            return
+        detector = getattr(self.stt, "wake_word", None)
+        if detector is None:
+            return
+        if detector.available or detector.load():
+            phrase = jarvis_config.WAKE_WORD or "the wake word"
+            print(f"[Waiting for '{phrase}'...]")
+            await asyncio.to_thread(detector.wait_for_wake_word, 60.0)
+
+    async def _listen_voice(self) -> str | None:
+        """
+        Listen for one utterance.
+
+        With streaming STT enabled, partial transcriptions arrive every
+        ~3 seconds while the user is still talking — instant intents
+        (e.g. "stop speaking") are acted on immediately, and the final
+        transcription drives normal routing.
+        """
+        streaming = getattr(self.stt, "astream_listen", None)
+        if (
+            streaming is None
+            or getattr(self.stt, "_streaming", None) is None
+        ):
+            return await asyncio.to_thread(self.listen)
+
+        handled_early = False
+        async for partial, is_final in streaming():
+            if is_final:
+                return partial
+            if not handled_early and partial:
+                # Partial while still talking: only instant intents act
+                # now — normal routing waits for the final text so a
+                # half-spoken phrase never triggers a full command.
+                handled_early = True
+                intent, _ = self.router.route(partial)
+                if intent == Intent.STOP_SPEECH:
+                    self.tts.stop()
+        return None
 
     # ── Benchmarking ──────────────────────────────────────────
 
@@ -832,7 +1014,12 @@ class JARVIS:
     # ── Main loop ─────────────────────────────────────────────
 
     def start_listening_loop(self) -> None:
-        """The listen → transcribe → route → respond loop."""
+        """Sync façade: run the async listen → transcribe → route →
+        respond loop on the event loop."""
+        self._run_coro(self.astart_listening_loop())
+
+    async def astart_listening_loop(self) -> None:
+        """The listen → transcribe → route → respond loop (async)."""
         print("\n=============================================")
         if self.text_mode:
             print("  JARVIS — TEXT MODE")
@@ -862,19 +1049,36 @@ class JARVIS:
             turn: dict = {}
             try:
                 if self.text_mode:
-                    user_input = input("\nYou: ").strip()
+                    # Blocking stdin read offloaded to a worker thread.
+                    user_input = (
+                        await asyncio.to_thread(
+                            lambda: input("\nYou: ").strip()
+                        )
+                    )
                     if not user_input:
                         continue
                 else:
                     # Never listen while JARVIS is still speaking,
                     # or the mic will pick up JARVIS's own voice (echo).
-                    t0 = time.perf_counter()
-                    self.tts.wait()
-                    turn["speak"] = time.perf_counter() - t0
+                    # With barge-in enabled, a monitor watches the mic
+                    # during this wait and interrupts TTS the moment
+                    # the user talks.
+                    barge_in = self._start_barge_in()
+                    try:
+                        t0 = time.perf_counter()
+                        await asyncio.to_thread(self.tts.wait)
+                        turn["speak"] = time.perf_counter() - t0
+                    finally:
+                        if barge_in is not None:
+                            barge_in.stop()
+
+                    # Wake word: only record after the wake phrase (when
+                    # enabled and the optional detector is available).
+                    await self._await_wake_word()
 
                     self._ui_state("listening")
                     t0 = time.perf_counter()
-                    user_input = self.listen()
+                    user_input = await self._listen_voice()
                     turn["listen"] = time.perf_counter() - t0
 
                     if user_input is None:
@@ -890,7 +1094,7 @@ class JARVIS:
                 consecutive_failures = 0
 
                 t0 = time.perf_counter()
-                should_continue = self.process_input(user_input)
+                should_continue = await self._aprocess_input(user_input)
                 turn["process"] = time.perf_counter() - t0
 
                 if not should_continue:
@@ -902,13 +1106,14 @@ class JARVIS:
                     f"[timing] total {turn['process']:.1f}s "
                     f"(process)"
                 )
-                time.sleep(0.1)
+                await asyncio.sleep(0.1)
 
             except KeyboardInterrupt:
                 print("\n[Interrupted]")
-                self.speak_blocking(
+                await asyncio.to_thread(
+                    self.speak_blocking,
                     f"Shutting down. "
-                    f"Goodbye, {jarvis_config.OWNER}."
+                    f"Goodbye, {jarvis_config.OWNER}.",
                 )
                 self.running = False
                 break
@@ -917,7 +1122,7 @@ class JARVIS:
                 # Log the message to console; trace only in debug mode.
                 logger.error(f"Unexpected error in main loop: {e}")
                 logger.debug("Traceback:", exc_info=True)
-                time.sleep(1)
+                await asyncio.sleep(1)
                 continue
 
     def shutdown(self) -> None:
@@ -937,6 +1142,14 @@ class JARVIS:
             except Exception:
                 pass
             self.ui = None
+        # Stop the dedicated event loop thread.
+        if not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=2.0)
+            try:
+                self._loop.close()
+            except Exception:
+                pass
         logger.info("JARVIS stopped.")
         print("\n[*] JARVIS offline. Goodbye.")
         if self.benchmark:
@@ -949,6 +1162,28 @@ class JARVIS:
         self.greet()
         try:
             self.start_listening_loop()
+        except KeyboardInterrupt:
+            # Ctrl+C lands on this (main) thread while the loop blocks
+            # on the listening coroutine — handle it gracefully.
+            print("\n[Interrupted]")
+            try:
+                self.speak_blocking(
+                    f"Shutting down. "
+                    f"Goodbye, {jarvis_config.OWNER}."
+                )
+            except Exception:
+                pass
+        finally:
+            self.shutdown()
+
+    async def arun(self) -> None:
+        """Async full lifecycle — used when driving JARVIS from an
+        existing event loop (GUI integrations)."""
+        self.running = True
+        self.initialize()
+        self.greet()
+        try:
+            await self.astart_listening_loop()
         finally:
             self.shutdown()
 

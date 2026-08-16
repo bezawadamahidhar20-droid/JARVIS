@@ -50,11 +50,50 @@ def _env_bool(key: str, default: bool) -> bool:
     return default
 
 
+# Placeholder values users paste from tutorials / READMEs. Treating them
+# as real secrets would make the app *appear* configured while every
+# call fails with an auth error — the exact silent failure this file
+# exists to prevent. See _env_secret().
+_PLACEHOLDER_SECRETS = {
+    "your-key-here", "your_key_here", "your key here",
+    "changeme", "replace-me", "replace_me",
+    "your_api_key_here", "your-api-key-here", "xxx", "sk-xxx",
+    "add-your-key", "api-key", "<api-key>", "YOUR_API_KEY",
+    "placeholder", "secret", "key", "12345",
+}
+
+
+def _env_secret(key: str) -> str:
+    """
+    Read an API key from the environment, normalizing placeholder
+    values to "" (unconfigured) so the app degrades gracefully instead
+    of failing every call with an auth error.
+
+    The original raw value is still visible to validate_config() (which
+    reads os.getenv directly) so the user gets a clear warning.
+    """
+    value = os.getenv(key, "").strip()
+    if not value:
+        return ""
+    if value.lower() in _PLACEHOLDER_SECRETS:
+        return ""
+    return value
+
+
 class OllamaConfig:
     # Base URL of the local Ollama server.
     BASE_URL: str = _env_str("OLLAMA_BASE_URL", "http://localhost:11434")
     # Model used as the AI brain (configurable; qwen3:8b is the default).
     MODEL: str = _env_str("OLLAMA_MODEL", "qwen3:8b")
+    # Circuit breaker: after this many consecutive failures JARVIS
+    # fast-fails AI requests ("AI offline") instead of blocking for
+    # OLLAMA_TIMEOUT on every request, and auto-recovers once Ollama
+    # comes back. 0 disables the breaker.
+    CIRCUIT_BREAKER: bool = _env_bool("OLLAMA_CIRCUIT_BREAKER", True)
+    # Consecutive failures that open the breaker (fast-fail mode).
+    CIRCUIT_THRESHOLD: int = _env_int("OLLAMA_CIRCUIT_THRESHOLD", 3)
+    # Seconds the breaker stays open before probing Ollama again.
+    CIRCUIT_RECOVERY: float = _env_float("OLLAMA_CIRCUIT_RECOVERY", 30.0)
     # Optional per-mode models, selected by JARVIS_MODEL_MODE:
     #   quality -> QUALITY_MODEL (falling back to MODEL)
     #   fast    -> FAST_MODEL     (falling back to MODEL)
@@ -167,9 +206,11 @@ class TTSConfig:
 class SearchConfig:
     # Web search provider: "tavily" | "serper" | "brave" | "" (disabled).
     PROVIDER: str = _env_str("SEARCH_PROVIDER", "tavily")
-    # API key for the selected provider. Empty = web search disabled
-    # (current-information questions then answer "cannot verify").
-    API_KEY: str = _env_str("SEARCH_API_KEY", "")
+    # API key for the selected provider. Empty (or a placeholder value)
+    # = web search disabled (current-information questions then answer
+    # "cannot verify"). Placeholder keys are normalized to empty here so
+    # they can never silently fail every call with an auth error.
+    API_KEY: str = _env_secret("SEARCH_API_KEY")
     # How many results to fetch per search.
     MAX_RESULTS: int = _env_int("SEARCH_MAX_RESULTS", 5)
     # Seconds identical queries are served from cache (0 disables).
@@ -188,8 +229,9 @@ class MemoryConfig:
 class GroqConfig:
     # Optional fallback LLM provider. Empty key = Groq disabled and the
     # assistant runs on Ollama alone. The key is only ever read from the
-    # environment / .env — never hardcoded, never logged.
-    API_KEY: str = _env_str("GROQ_API_KEY", "")
+    # environment / .env — never hardcoded, never logged. Placeholder
+    # values are normalized to empty (see _env_secret).
+    API_KEY: str = _env_secret("GROQ_API_KEY")
     MODEL: str = _env_str("GROQ_MODEL", "llama-3.3-70b-versatile")
     TIMEOUT: int = _env_int("GROQ_TIMEOUT", 60)
     TEMPERATURE: float = _env_float("GROQ_TEMPERATURE", 0.7)
@@ -212,6 +254,14 @@ class JARVISConfig:
     # pending before it expires and can never be executed. 0 = no timeout.
     CONFIRMATION_TIMEOUT: int = _env_int("CONFIRMATION_TIMEOUT", 30)
 
+    # When true, destructive confirmations require the user to echo a
+    # random nonce code (e.g. "say the code a3f2 to confirm") before
+    # they execute — a stray "yes" from another process or an injected
+    # stdin write can never authorize the action.
+    CONFIRMATION_REQUIRE_TOKEN: bool = _env_bool(
+        "CONFIRMATION_REQUIRE_TOKEN", False
+    )
+
     # Answer mode for the question classifier:
     #   auto  — decide per question whether fresh info is needed (default)
     #   local — always answer from the local LLM
@@ -231,6 +281,24 @@ class JARVISConfig:
     MEMORY_MAX_CHARS: int = _env_int("MEMORY_MAX_CHARS", 3000)
     ENABLE_FAST_RESPONSES: bool = _env_bool("ENABLE_FAST_RESPONSES", True)
     ENABLE_WARMUP: bool = _env_bool("ENABLE_WARMUP", True)
+
+    # Streaming STT: transcribe 3-second windows while the user is still
+    # speaking and feed partial results to the router (early "stop"
+    # detection, faster perceived response). Costs extra CPU on
+    # CPU-only machines, so it defaults to off.
+    STT_STREAM: bool = _env_bool("STT_STREAM", False)
+
+    # Wake-word detection: when enabled (and the openwakeword package +
+    # model are available) JARVIS only listens after "hey jarvis"
+    # instead of always-on VAD. Falls back to always-on when the
+    # optional dependency is missing.
+    ENABLE_WAKE_WORD: bool = _env_bool("ENABLE_WAKE_WORD", False)
+    WAKE_WORD: str = _env_str("JARVIS_WAKE_WORD", "hey jarvis").strip().lower()
+
+    # Barge-in: monitor the microphone while JARVIS is speaking and
+    # interrupt TTS the moment the user talks. Needs a quiet room / echo
+    # handling, so it defaults to off.
+    ENABLE_BARGE_IN: bool = _env_bool("ENABLE_BARGE_IN", False)
 
 
 class LogConfig:
@@ -310,6 +378,11 @@ def validate_config() -> list[dict]:
             "must be >= 0 seconds (0 disables the timeout).",
             fatal=True,
         ))
+    if not c.WAKE_WORD.strip():
+        problems.append(_problem(
+            "JARVIS_WAKE_WORD",
+            "must not be empty when wake-word detection is enabled.",
+        ))
 
     # ── Ollama ─────────────────────────────────────────────────
     o = ollama_config
@@ -345,6 +418,16 @@ def validate_config() -> list[dict]:
     if o.NUM_CTX <= 0:
         problems.append(_problem(
             "OLLAMA_NUM_CTX", "must be > 0 tokens.", fatal=True,
+        ))
+    if o.CIRCUIT_THRESHOLD < 1:
+        problems.append(_problem(
+            "OLLAMA_CIRCUIT_THRESHOLD", "must be >= 1 failure.",
+            fatal=True,
+        ))
+    if o.CIRCUIT_RECOVERY <= 0:
+        problems.append(_problem(
+            "OLLAMA_CIRCUIT_RECOVERY", "must be > 0 seconds.",
+            fatal=True,
         ))
 
     # ── Groq (optional) ────────────────────────────────────────
@@ -476,6 +559,23 @@ def validate_config() -> list[dict]:
         problems.append(_problem(
             "SEARCH_PROVIDER",
             f"'{q.PROVIDER}' is unknown; web search will stay disabled.",
+        ))
+
+    # Placeholder API keys are normalized to "" (search disabled), but
+    # the user still deserves to know their .env has a fake key.
+    raw_search_key = (os.getenv("SEARCH_API_KEY", "") or "").strip()
+    if raw_search_key and raw_search_key.lower() in _PLACEHOLDER_SECRETS:
+        problems.append(_problem(
+            "SEARCH_API_KEY",
+            "looks like a placeholder value — web search is disabled "
+            "until a real key is set. (The value itself is never logged.)",
+        ))
+    raw_groq_key = (os.getenv("GROQ_API_KEY", "") or "").strip()
+    if raw_groq_key and raw_groq_key.lower() in _PLACEHOLDER_SECRETS:
+        problems.append(_problem(
+            "GROQ_API_KEY",
+            "looks like a placeholder value — Groq fallback is disabled "
+            "until a real key is set.",
         ))
     if not 1 <= q.MAX_RESULTS <= 20:
         problems.append(_problem(

@@ -15,6 +15,8 @@ commands — the deterministic CommandRegistry is the only thing that
 touches the OS (see commands/).
 """
 
+import asyncio
+import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -62,12 +64,109 @@ class LLMProvider(ABC):
         training knowledge.
         """
 
+    async def ask_stream_async(
+        self,
+        user_input: str,
+        memory=None,
+        context: Optional[str] = None,
+    ):
+        """Optional async streaming: yield each finished sentence as it
+        is generated, so TTS can start (and barge-in can cancel) while
+        the rest of the answer is still being written.
+
+        Providers without a native async path are bridged automatically
+        by the orchestrator (see ``stream_sentences_async``). Not an
+        abstract method on purpose — sync-only fakes stay compatible.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not implement ask_stream_async"
+        )
+
     def warmup(self) -> None:
         """Optional: pre-load the model so the first real request is fast."""
 
     def describe(self) -> str:
         """Short status string for `jarvis --doctor`."""
         return self.name
+
+
+async def stream_sentences_async(
+    provider: LLMProvider,
+    user_input: str,
+    memory=None,
+    context: Optional[str] = None,
+):
+    """Yield response sentences from *any* provider, async.
+
+    Uses ``ask_stream_async`` when the provider has a native async
+    path; otherwise bridges the sync ``ask_stream`` over a worker
+    thread + asyncio.Queue so the event loop stays responsive either
+    way.
+
+    Yields:
+        str: each finished sentence
+    """
+    native = getattr(provider, "ask_stream_async", None)
+    if native is not None and not getattr(
+        native, "_is_sync_bridge", False
+    ):
+        try:
+            kwargs: dict = {}
+            if context is not None:
+                kwargs["context"] = context
+            async for sentence in native(user_input, memory, **kwargs):
+                yield sentence
+            return
+        except NotImplementedError:
+            pass  # fall through to the bridge
+        except Exception as e:
+            logger.warning(
+                f"Async streaming failed ({e}); bridging sync stream."
+            )
+
+    queue: "asyncio.Queue" = asyncio.Queue()
+    done = threading.Event()
+    result_holder: list = []
+
+    def _produce() -> None:
+        def _on_sentence(s: str) -> None:
+            try:
+                queue.put_nowait(("sentence", s))
+            except Exception:
+                pass
+
+        try:
+            kwargs = {}
+            if context is not None:
+                kwargs["context"] = context
+            result = provider.ask_stream(
+                user_input, memory, on_sentence=_on_sentence, **kwargs
+            )
+            result_holder.append(result)
+        except Exception as e:
+            logger.error(f"Streaming provider error: {e}")
+        finally:
+            done.set()
+            try:
+                queue.put_nowait(("done", None))
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_produce, name="jarvis-sync-stream", daemon=True
+    ).start()
+
+    while True:
+        kind, value = await queue.get()
+        if kind == "done":
+            break
+        yield value
+    done.wait(timeout=2.0)
+
+
+# Mark the bridge helper so a provider that *delegates* to it (see
+# FallbackProvider below) is never mistaken for a native async path.
+stream_sentences_async._is_sync_bridge = True  # type: ignore[attr-defined]
 
 
 class FallbackProvider(LLMProvider):
@@ -140,6 +239,39 @@ class FallbackProvider(LLMProvider):
                 user_input, memory, on_sentence=on_sentence, context=context
             )
         return response
+
+    async def ask_stream_async(
+        self,
+        user_input: str,
+        memory=None,
+        context: Optional[str] = None,
+    ):
+        """Async streaming with primary -> fallback ordering.
+
+        Tries the primary's native async path first; if that fails or
+        produces nothing, the fallback's sync stream is bridged.
+        """
+        primary_async = getattr(self.primary, "ask_stream_async", None)
+        if primary_async is not None:
+            produced = False
+            try:
+                async for sentence in primary_async(
+                    user_input, memory, context=context
+                ):
+                    produced = True
+                    yield sentence
+            except Exception as e:
+                logger.warning(
+                    f"Primary async stream failed ({e}); using fallback."
+                )
+            if produced:
+                return
+        if self.fallback is not None:
+            logger.warning("Primary provider failed — using Groq fallback.")
+            async for sentence in stream_sentences_async(
+                self.fallback, user_input, memory, context=context
+            ):
+                yield sentence
 
     def _try_primary(self, fn, user_input, memory, **kwargs):
         """Run *fn* on the primary provider, catching any exception so a

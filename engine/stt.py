@@ -14,6 +14,7 @@ Design rules:
   * Any failure is logged and recovered from; the caller keeps looping.
 """
 
+import threading
 import time
 
 import numpy as np
@@ -25,7 +26,7 @@ logger = get_logger("stt")
 
 # ── Load config safely ────────────────────────────────────────
 try:
-    from config import stt_config, whisper_config
+    from config import jarvis_config, stt_config, whisper_config
 
     SAMPLE_RATE = stt_config.SAMPLE_RATE
     WHISPER_MODEL = whisper_config.MODEL
@@ -33,6 +34,9 @@ try:
     WHISPER_DEVICE = whisper_config.DEVICE
     WHISPER_LANGUAGE = whisper_config.LANGUAGE
     WHISPER_BEAM_SIZE = whisper_config.BEAM_SIZE
+    STT_STREAM = jarvis_config.STT_STREAM
+    ENABLE_WAKE_WORD = jarvis_config.ENABLE_WAKE_WORD
+    WAKE_WORD = jarvis_config.WAKE_WORD
 except Exception:
     SAMPLE_RATE = 16000
     WHISPER_MODEL = "base"
@@ -40,6 +44,9 @@ except Exception:
     WHISPER_DEVICE = "auto"
     WHISPER_LANGUAGE = "en"
     WHISPER_BEAM_SIZE = 1
+    STT_STREAM = False
+    ENABLE_WAKE_WORD = False
+    WAKE_WORD = "hey jarvis"
 
 
 # Compute type used when CUDA is selected but the config still says the
@@ -84,6 +91,32 @@ class STTEngine:
         self.device = WHISPER_DEVICE
         self.vad = AdaptiveVAD(sample_rate=SAMPLE_RATE)
         self._loaded = False
+
+        # Streaming STT (windowed partials while recording) — only when
+        # enabled in .env (extra CPU on CPU-only machines).
+        self._streaming = None
+        if STT_STREAM:
+            try:
+                from engine.streaming_stt import StreamingListener
+
+                self._streaming = StreamingListener(self.vad, self)
+            except Exception as e:
+                logger.warning(f"Streaming STT unavailable: {e}")
+
+        # Optional wake-word detector (openwakeword) — graceful
+        # fallback to always-on VAD when the package is missing.
+        self.wake_word = None
+        if ENABLE_WAKE_WORD:
+            try:
+                from engine.wakeword import WakeWordDetector
+
+                self.wake_word = WakeWordDetector(
+                    wake_word=WAKE_WORD,
+                    sample_rate=SAMPLE_RATE,
+                    input_device=stt_config.INPUT_DEVICE,
+                )
+            except Exception as e:
+                logger.warning(f"Wake-word detector unavailable: {e}")
 
     # ── Model lifecycle ───────────────────────────────────────
 
@@ -235,6 +268,51 @@ class STTEngine:
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             return None
+
+    # ── Streaming STT ─────────────────────────────────────────
+
+    def stream_listen(self):
+        """
+        Blocking streaming listen: yields (partial, is_final) tuples.
+
+        Partial transcriptions arrive every ~3 seconds while the user
+        is still speaking; the final tuple carries the full phrase.
+        Requires STT_STREAM=true; otherwise raises RuntimeError.
+        """
+        if self._streaming is None:
+            raise RuntimeError(
+                "Streaming STT not enabled (set STT_STREAM=true)."
+            )
+        yield from self._streaming.listen_stream()
+
+    async def astream_listen(self):
+        """Async streaming listen: same tuples, but recording and
+        transcription run on a worker thread so the event loop stays
+        responsive."""
+        import asyncio
+
+        queue: "asyncio.Queue" = asyncio.Queue()
+
+        def _produce() -> None:
+            try:
+                for partial, is_final in self.stream_listen():
+                    queue.put_nowait((partial, is_final))
+            except Exception as e:
+                logger.error(f"Streaming listen failed: {e}")
+                try:
+                    queue.put_nowait((None, True))
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_produce, name="jarvis-stream-listen", daemon=True
+        ).start()
+
+        while True:
+            partial, is_final = await queue.get()
+            yield partial, is_final
+            if is_final:
+                break
 
     # ── Diagnostics ───────────────────────────────────────────
 

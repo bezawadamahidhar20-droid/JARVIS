@@ -21,41 +21,50 @@ finishes; ask() remains for --text mode / non-streaming callers.
 """
 
 import json
+import threading
 import time
 import requests
 from typing import Optional, List, Dict, Callable
 from utils.logger import get_logger
 from brain.llm import LLMProvider
+from brain.circuit_breaker import CircuitBreaker
+from brain.exceptions import OllamaTimeoutError
 
 logger = get_logger("ollama_client")
 
 # ── Load config safely ────────────────────────────────────────
 try:
     from config import ollama_config, jarvis_config
-    OLLAMA_BASE_URL    = ollama_config.BASE_URL
-    OLLAMA_MODEL       = ollama_config.MODEL
-    OLLAMA_TIMEOUT     = ollama_config.TIMEOUT
-    OLLAMA_TEMP        = ollama_config.TEMPERATURE
-    OLLAMA_STREAM      = ollama_config.STREAM
-    OLLAMA_NUM_PREDICT = ollama_config.NUM_PREDICT
-    OLLAMA_NUM_CTX     = ollama_config.NUM_CTX
-    OLLAMA_KEEP_ALIVE  = ollama_config.KEEP_ALIVE
-    OLLAMA_NUM_GPU     = ollama_config.NUM_GPU
-    OLLAMA_THINK       = ollama_config.THINK
-    OWNER              = jarvis_config.OWNER
+    OLLAMA_BASE_URL       = ollama_config.BASE_URL
+    OLLAMA_MODEL          = ollama_config.MODEL
+    OLLAMA_TIMEOUT        = ollama_config.TIMEOUT
+    OLLAMA_TEMP           = ollama_config.TEMPERATURE
+    OLLAMA_STREAM         = ollama_config.STREAM
+    OLLAMA_NUM_PREDICT    = ollama_config.NUM_PREDICT
+    OLLAMA_NUM_CTX        = ollama_config.NUM_CTX
+    OLLAMA_KEEP_ALIVE     = ollama_config.KEEP_ALIVE
+    OLLAMA_NUM_GPU        = ollama_config.NUM_GPU
+    OLLAMA_THINK          = ollama_config.THINK
+    OLLAMA_CIRCUIT_BREAKER = ollama_config.CIRCUIT_BREAKER
+    OLLAMA_CIRCUIT_THRESHOLD = ollama_config.CIRCUIT_THRESHOLD
+    OLLAMA_CIRCUIT_RECOVERY = ollama_config.CIRCUIT_RECOVERY
+    OWNER                 = jarvis_config.OWNER
 except Exception as e:
     logger.warning(f"Config load failed, using defaults: {e}")
-    OLLAMA_BASE_URL    = "http://localhost:11434"
-    OLLAMA_MODEL       = "qwen3:8b"
-    OLLAMA_TIMEOUT     = 120
-    OLLAMA_TEMP        = 0.7
-    OLLAMA_STREAM      = True
-    OLLAMA_NUM_PREDICT = 150
-    OLLAMA_NUM_CTX     = 2048
-    OLLAMA_KEEP_ALIVE  = "30m"
-    OLLAMA_NUM_GPU     = 99
-    OLLAMA_THINK       = False
-    OWNER              = "Sir"
+    OLLAMA_BASE_URL       = "http://localhost:11434"
+    OLLAMA_MODEL          = "qwen3:8b"
+    OLLAMA_TIMEOUT        = 120
+    OLLAMA_TEMP           = 0.7
+    OLLAMA_STREAM         = True
+    OLLAMA_NUM_PREDICT    = 150
+    OLLAMA_NUM_CTX        = 2048
+    OLLAMA_KEEP_ALIVE     = "30m"
+    OLLAMA_NUM_GPU        = 99
+    OLLAMA_THINK          = False
+    OLLAMA_CIRCUIT_BREAKER = True
+    OLLAMA_CIRCUIT_THRESHOLD = 3
+    OLLAMA_CIRCUIT_RECOVERY = 30.0
+    OWNER                 = "Sir"
 
 # ── Short system prompt (<60 words, fewer tokens = faster) ────
 SYSTEM_PROMPT = (
@@ -134,6 +143,16 @@ class OllamaClient(LLMProvider):
         self.keep_alive  = keep_alive    or OLLAMA_KEEP_ALIVE
         self.num_gpu     = num_gpu       if num_gpu is not None else OLLAMA_NUM_GPU
         self.think       = think         if think is not None else OLLAMA_THINK
+        # Circuit breaker: after CIRCUIT_THRESHOLD consecutive failures
+        # requests fast-fail ("AI offline") instead of blocking for the
+        # full timeout, and the breaker auto-recovers when Ollama
+        # restarts. 0 disables it.
+        self._breaker = CircuitBreaker(
+            failure_threshold=OLLAMA_CIRCUIT_THRESHOLD,
+            recovery_timeout=OLLAMA_CIRCUIT_RECOVERY,
+            enabled=bool(OLLAMA_CIRCUIT_BREAKER),
+        )
+        self._breaker_lock = threading.Lock()
         self._verify_connection()
 
     def describe(self) -> str:
@@ -191,8 +210,20 @@ class OllamaClient(LLMProvider):
         except Exception as e:
             logger.error(f"Connection check error: {e}")
 
+    @property
+    def breaker_open(self) -> bool:
+        """True when the circuit breaker is fast-failing requests."""
+        return self._breaker.is_open
+
     def is_available(self) -> bool:
-        """Quick ping to check if Ollama is reachable."""
+        """Quick ping to check if Ollama is reachable.
+
+        Fast-fails (False) while the circuit breaker is open instead of
+        hitting the network — repeated timeouts never stack up.
+        """
+        if self._breaker.is_open:
+            logger.debug("Ollama unavailable (circuit breaker open).")
+            return False
         try:
             r = requests.get(
                 f"{self.base_url}/api/tags",
@@ -209,7 +240,13 @@ class OllamaClient(LLMProvider):
         Pre-load the model into RAM by sending a tiny request
         (num_predict=1). Call this in a background thread on
         startup so the first real question has no cold-start delay.
+
+        Skipped while the circuit breaker is open (the model cannot be
+        reached anyway).
         """
+        if self._breaker.is_open:
+            logger.info("Warm-up skipped (circuit breaker open).")
+            return
         logger.info(
             f"Warming up {self.model} (loading into RAM)..."
         )
@@ -301,6 +338,81 @@ class OllamaClient(LLMProvider):
 
         return self._clean_response(full)
 
+    # ── Async streaming ask (async orchestrator) ──────────────
+
+    async def ask_stream_async(
+        self,
+        user_input: str,
+        memory=None,
+        context: Optional[str] = None,
+    ):
+        """
+        Stream the response sentence-by-sentence (async generator).
+
+        Each finished sentence is yielded as soon as it completes, so
+        the orchestrator can start TTS (or barge-in) while the rest of
+        the answer is still generating. The heavy HTTP streaming runs
+        on a worker thread; the event loop stays responsive.
+
+        Cancelling the async generator (``aclose()``) aborts the
+        underlying HTTP stream via a cancel event.
+
+        Yields:
+            str: each finished sentence
+
+        Returns nothing on failure (sentences already spoken stay
+        spoken; the caller rolls back memory).
+        """
+        if not user_input or not user_input.strip():
+            return
+        if self._breaker.is_open:
+            logger.warning(
+                "Ollama circuit breaker open — fast-failing request."
+            )
+            return
+
+        messages = self._build_messages(user_input, memory, context=context)
+        payload = self._build_payload(messages, stream=True)
+
+        import asyncio
+
+        queue: "asyncio.Queue" = asyncio.Queue()
+        cancel_event = threading.Event()
+        thread_done = threading.Event()
+
+        def _produce() -> None:
+            def _on_sentence(s: str) -> None:
+                try:
+                    queue.put_nowait(("sentence", s))
+                except Exception:
+                    pass
+
+            try:
+                full, _ = self._stream_generate(
+                    payload, _on_sentence, cancel_event=cancel_event
+                )
+                queue.put_nowait(("done", full))
+            except Exception as e:  # pragma: no cover - defensive
+                logger.error(f"Async stream failed: {e}")
+                queue.put_nowait(("done", None))
+            finally:
+                thread_done.set()
+
+        threading.Thread(
+            target=_produce, name="jarvis-ollama-stream", daemon=True
+        ).start()
+
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == "done":
+                    break
+                yield value
+        finally:
+            # Cancellation (aclose / barge-in): abort the HTTP stream.
+            cancel_event.set()
+            thread_done.wait(timeout=2.0)
+
     # ── Non-streaming ask (--text mode / back-compat) ─────────
 
     def ask(
@@ -335,6 +447,12 @@ class OllamaClient(LLMProvider):
 
         start_time = time.perf_counter()
 
+        if self._breaker.is_open:
+            logger.warning(
+                "Ollama circuit breaker open — fast-failing request."
+            )
+            return None
+
         try:
             logger.info(
                 f"Asking [{self.model}]: '{user_input[:60]}'"
@@ -359,11 +477,13 @@ class OllamaClient(LLMProvider):
 
             if not content:
                 logger.error("Ollama returned empty response.")
+                self._breaker.record_failure()
                 return None
 
             # Clean markdown artifacts that sound bad when spoken
             content = self._clean_response(content)
 
+            self._breaker.record_success()
             logger.info(
                 f"[timing] response in {elapsed:.1f}s | "
                 f"{len(content)} chars"
@@ -374,6 +494,7 @@ class OllamaClient(LLMProvider):
 
         except requests.ConnectionError:
             logger.error("Lost connection to Ollama.")
+            self._breaker.record_failure()
             return None
 
         except requests.Timeout:
@@ -382,42 +503,58 @@ class OllamaClient(LLMProvider):
                 f"Ollama timed out after {elapsed:.0f}s. "
                 "Try restarting Ollama."
             )
-            return None
+            self._breaker.record_failure()
+            raise OllamaTimeoutError(
+                f"Ollama timed out after {elapsed:.0f}s"
+            ) from None
 
         except requests.HTTPError as e:
             logger.error(
                 f"Ollama HTTP error "
                 f"{e.response.status_code}: {e}"
             )
+            self._breaker.record_failure()
             return None
 
         except json.JSONDecodeError as e:
             logger.error(
                 f"Failed to parse Ollama JSON: {e}"
             )
+            self._breaker.record_failure()
             return None
 
         except Exception as e:
-            logger.error(f"Unexpected Ollama error: {e}")
-            return None
+            logger.exception(f"Unexpected Ollama error: {e}")
+            self._breaker.record_failure()
+            raise
 
     # ── Streaming internals ───────────────────────────────────
 
     def _stream_generate(
         self,
         payload: dict,
-        on_sentence: Callable[[str], None]
+        on_sentence: Callable[[str], None],
+        cancel_event: Optional[threading.Event] = None,
     ):
         """
         Stream NDJSON lines from Ollama, split them into sentences and
         hand each one to on_sentence as it completes. Returns
         (full_text, timing_dict).
+
+        ``cancel_event`` (optional): when set, the HTTP stream is
+        closed early — used to abort generation on barge-in / stop.
         """
         start = time.perf_counter()
         first_token_at = None
         full = ""
         buffer = ""
         tokens = 0
+
+        if self._breaker.is_open:
+            logger.warning(
+                "Ollama circuit breaker open — fast-failing request."
+            )
+            return None, None
 
         try:
             resp = requests.post(
@@ -436,9 +573,13 @@ class OllamaClient(LLMProvider):
                 logger.error(
                     f"Ollama stream HTTP {resp.status_code}: {err}"
                 )
+                self._breaker.record_failure()
                 return None, None
 
             for line in resp.iter_lines(decode_unicode=True):
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info("Stream cancelled (barge-in / stop).")
+                    break
                 if not line:
                     continue
                 line = line.strip()
@@ -451,6 +592,7 @@ class OllamaClient(LLMProvider):
 
                 if "error" in data:
                     logger.error(f"Ollama stream error: {data['error']}")
+                    self._breaker.record_failure()
                     return None, None
 
                 msg = data.get("message", {}) or {}
@@ -480,29 +622,41 @@ class OllamaClient(LLMProvider):
                     break
 
             # Flush any trailing partial sentence.
-            if buffer.strip():
+            if buffer.strip() and (
+                cancel_event is None or not cancel_event.is_set()
+            ):
                 clean = self._clean_response(buffer)
                 if clean and on_sentence:
                     on_sentence(clean)
                 buffer = ""
 
-            resp.close()
+            try:
+                resp.close()
+            except Exception:
+                pass
 
         except requests.ConnectionError:
             logger.error("Lost connection to Ollama.")
+            self._breaker.record_failure()
             return None, None
         except requests.Timeout:
             logger.error(
                 f"Ollama stream timed out after {self.timeout}s."
             )
+            self._breaker.record_failure()
             return None, None
         except requests.RequestException as e:
             logger.error(f"Ollama stream request error: {e}")
+            self._breaker.record_failure()
             return None, None
         except Exception as e:
-            logger.error(f"Ollama stream error: {e}")
+            logger.exception(f"Ollama stream error: {e}")
+            self._breaker.record_failure()
             return None, None
 
+        # Stream completed cleanly — close the breaker (if it was open
+        # from earlier failures this recovery resets it).
+        self._breaker.record_success()
         elapsed = time.perf_counter() - start
         first = (first_token_at - start) if first_token_at else elapsed
         logger.info(

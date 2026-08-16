@@ -199,6 +199,7 @@ Then just talk.
 | `jarvis --debug` | Verbose debug logging on the console |
 | `jarvis --benchmark` | Print per-stage latency after the session |
 | `jarvis --benchmark-models` | Benchmark `qwen3:8b` / `qwen3:1.7b` / `llama3.2:3b` on the same questions, score grounding + conciseness, and print a recommendation |
+| `jarvis --benchmark-models --save-baseline` | Also save this run as the latency baseline (`outputs/benchmark_baseline.json`); future runs warn when a model is >1.2× slower — handy for catching regressions in CI |
 | `jarvis --hardware` | Read-only CPU / RAM / GPU / Ollama / model-size report |
 | `jarvis --doctor` | Health check with fix instructions |
 | `jarvis --version` | Show the installed version |
@@ -265,6 +266,9 @@ Everything is centralized in `config.py` and read from `.env` (see [`.env.exampl
 | `OLLAMA_TEMPERATURE` | `0.7` | Creativity (0 strict → 1 wild) |
 | `OLLAMA_NUM_PREDICT` | `120` | Max response length (≈3–4 spoken sentences) |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays loaded in RAM (model warming) |
+| `OLLAMA_CIRCUIT_BREAKER` | `true` | Fast-fail AI requests after repeated Ollama failures instead of hanging for `OLLAMA_TIMEOUT` each time |
+| `OLLAMA_CIRCUIT_THRESHOLD` | `3` | Consecutive failures that open the breaker |
+| `OLLAMA_CIRCUIT_RECOVERY` | `30` | Seconds before the breaker probes Ollama again |
 | `WHISPER_MODEL` | `base` | Faster-Whisper size: `tiny` \| `base` \| `small` ... |
 | `WHISPER_COMPUTE_TYPE` | `int8` | `int8` for CPU, `float16` for CUDA |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
@@ -285,6 +289,11 @@ Everything is centralized in `config.py` and read from `.env` (see [`.env.exampl
 | `SEARCH_MAX_RESULTS` | `5` | Results fetched per search |
 | `MEMORY_MAX_TURNS` | `6` | Turns of conversation context |
 | `ENABLE_WARMUP` | `true` | Pre-load the model at startup |
+| `STT_STREAM` | `false` | Transcribe 3-second windows while speaking (partial results; costs extra CPU) |
+| `ENABLE_WAKE_WORD` | `false` | Only listen after "hey jarvis" (`pip install openwakeword`; falls back to always-on) |
+| `JARVIS_WAKE_WORD` | `hey jarvis` | The wake phrase (openwakeword model name) |
+| `ENABLE_BARGE_IN` | `false` | Interrupt TTS the moment you start talking (needs a quiet room) |
+| `CONFIRMATION_REQUIRE_TOKEN` | `false` | Require echoing a random nonce code to confirm destructive actions (defends against stray "yes" from other processes) |
 
 ---
 
@@ -384,6 +393,8 @@ When the search cannot verify the information (no API key, search failure, no re
 - **No arbitrary shell execution.** There is no `LLM → PowerShell → computer` path. Only explicitly registered commands execute, through `LLM → recognized intent → registered safe command → permission validation → execution`.
 - **Permission levels.** `SAFE` commands run immediately; `CONFIRM` commands (shutdown/restart/sleep) only run after an explicit "yes"; anything else (arbitrary shell, file deletion, `kill process X`, credential access) is **BLOCKED** — it never reaches the OS.
 - **Windows commands are explicitly mapped** (`subprocess.Popen` / `os.startfile` with hardcoded targets).
+- **Trusted registries are frozen.** The app/website/folder tables are read-only mappings — nothing at runtime (or from an import) can mutate them into a hijacked target.
+- **Destructive confirmations are time-boxed, single-use, and optionally nonce-bound.** A confirmation expires, `take()` can claim it exactly once, and with `CONFIRMATION_REQUIRE_TOKEN=true` the user must echo a random code — a stray "yes" from another process can never authorize a shutdown/restart/sleep.
 
 ---
 
@@ -396,7 +407,7 @@ The test suite runs entirely with mocks — no microphone, speakers, or AI serve
 .\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-351 tests cover configuration, routing, the question classifier, web-search providers (mocked HTTP), commands + permission levels, Ollama (mocked HTTP), memory, VAD, STT, TTS, microphone detection, the doctor, the CLI, wake-name normalization, model-mode selection, the model benchmark, the hardware report, and shutdown behavior.
+Tests cover configuration, routing, the question classifier, web-search providers (mocked HTTP), commands + permission levels, Ollama (mocked HTTP), memory, VAD, STT, TTS, microphone detection, the doctor, the CLI, wake-name normalization, model-mode selection, the model benchmark, the hardware report, shutdown behavior, the circuit breaker, the confirmation nonce, the DI container, and a headless GUI smoke test. The benchmark CLI can also save/compare a latency baseline (`--save-baseline`) to catch regressions.
 
 ---
 
@@ -408,6 +419,26 @@ The test suite runs entirely with mocks — no microphone, speakers, or AI serve
 - `jarvis --benchmark` prints per-stage latency (listen / process / speak) for the whole session.
 
 **Honest expectations:** local CPU inference is slower than cloud APIs. The first question after a cold start is the slowest (model loading); later questions are fast. Hardware dominates — latency scales with your CPU/RAM.
+
+---
+
+## 🖥️ Desktop GUI
+
+`jarvis --gui` launches the PySide6 + OpenGL holographic interface — a 3D sphere, particle field, live waveform, and HUD panels driven by the same pipeline. The GUI degrades to a demo mode when the backend (mic/Ollama) is unavailable, so the interface is previewable anywhere.
+
+```powershell
+jarvis --gui
+```
+
+Requirements (one-time):
+
+```powershell
+pip install -r jarvis_ui\requirements_ui.txt
+```
+
+> Screenshot: `docs/gui-screenshot.png` (capture from your machine and commit it to update this page).
+
+The GUI is covered by headless smoke tests in CI (`tests/test_gui_import.py` — runs with `QT_QPA_PLATFORM=offscreen`, no display needed).
 
 ---
 
@@ -493,9 +524,10 @@ JARVIS/
 
 ## 🗺️ Roadmap
 
-- **Wake-word detection** — activate JARVIS only after a hotword.
-- **Interruption / barge-in** — stop speaking when the user talks.
-- **More providers** — Groq, NVIDIA NIM, Gemini via `brain/llm.py`.
+- **Wake-word detection** — ✅ shipped (opt-in): `ENABLE_WAKE_WORD=true` + `pip install openwakeword` (`engine/wakeword.py`). Falls back to always-on VAD when the package is missing.
+- **Interruption / barge-in** — ✅ shipped (opt-in): `ENABLE_BARGE_IN=true` interrupts TTS the moment you talk (`engine/barge_in.py`).
+- **Streaming STT partials** — ✅ shipped (opt-in): `STT_STREAM=true` transcribes 3-second windows while you speak, so instant intents like "stop speaking" act immediately (`engine/streaming_stt.py`).
+- **More providers** — Groq, NVIDIA NIM, Gemini via `brain/llm.py` (already has a provider registry + async streaming interface).
 - **More desktop commands** — broader app catalog and window control.
 
 ---
