@@ -90,7 +90,7 @@
   <text x="360" y="487" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#6ee7b7">🧭 COMMAND ROUTER</text>
   <text x="360" y="510" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">deterministic match</text>
 
-  <!-- Branch: left to LOCAL COMMAND, right to QWEN3 -->
+  <!-- Branch: left to LOCAL COMMAND, right to LLAMA3.2 -->
   <path d="M340 526 L340 570 L130 570 L130 620" fill="none" stroke="url(#nodeGreen)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
     <animate attributeName="stroke-dashoffset" from="34" to="0" dur="1.2s" repeatCount="indefinite"/>
   </path>
@@ -105,10 +105,10 @@
   <text x="130" y="652" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#6ee7b7">💻 LOCAL COMMAND</text>
   <text x="130" y="675" text-anchor="middle" font-family="Consolas, monospace" font-size="11" fill="#94a3b8">time · date · apps</text>
 
-  <!-- QWEN3 -->
+  <!-- LLAMA3.2 -->
   <rect x="480" y="625" width="220" height="66" rx="14" fill="url(#node1)" stroke="url(#nodeAmber)" stroke-width="1.8"/>
-  <text x="590" y="652" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#fcd34d">🤖 QWEN3 · OLLAMA</text>
-  <text x="590" y="675" text-anchor="middle" font-family="Consolas, monospace" font-size="11" fill="#94a3b8">local LLM · 8B</text>
+  <text x="590" y="652" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#fcd34d">🤖 LLAMA3.2 · OLLAMA</text>
+  <text x="590" y="675" text-anchor="middle" font-family="Consolas, monospace" font-size="11" fill="#94a3b8">local LLM · 3B</text>
 
   <!-- Merge back to PIPER -->
   <path d="M130 691 L130 740 L360 740 L360 770" fill="none" stroke="url(#nodeGreen)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">

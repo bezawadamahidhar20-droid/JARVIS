@@ -1,234 +1,632 @@
-# JARVIS — Local AI Voice Assistant
+<div align="center">
 
-A voice assistant that runs **100% locally**: your microphone captures
-speech, [Ollama](https://ollama.com) + **llama3.2:3b** answer questions, and
-your speakers reply. No cloud AI, no paid API keys, no monthly fees.
+<br/>
 
-```
-   ╔════════════════════════════════════════════════════════════╗
-   ║  microphone → speech-to-text → intent router → llama3.2:3b  ║
-   ║  llama3.2 / commands → text-to-speech → speakers            ║
-   ╚════════════════════════════════════════════════════════════╝
-```
+<img src="docs/hero-core.svg" alt="JARVIS — AI Core" width="100%"/>
 
-## Key features
+<br/>
 
-- **llama3.2:3b brain** — ~3× faster than the old Qwen3 8B on CPU.
-- **Streaming replies** — the first sentence is spoken while the rest of the
-  answer is still generating (`ask_stream()` + non-blocking TTS queue).
-- **Instant greetings** — 24 canned replies ("hello", "who are you", "good
-  night", …) answered locally with zero AI round-trip.
-- **Background model warm-up** — the model is pre-loaded into RAM at startup,
-  so the first question has no cold-start delay.
-- **Conversation memory** — follow-ups like *"Who is Elon Musk?"* →
-  *"What companies does he own?"* just work.
-- **No PyAudio, no FLAC** — microphone capture uses `sounddevice`, and speech
-  recognition sends raw PCM straight to Google's HTTP API. Works on Python
-  3.14 Windows 11 (where PyAudio and the bundled `flac.exe` both fail).
-- **AI is the default route** — anything the router doesn't recognise as a
-  command goes to the model, never an "I don't understand" dead-end.
+**JARVIS** is a private, hands-free AI voice assistant for **Windows** — powered entirely by local speech recognition, local LLM inference, deterministic commands, and neural TTS.
 
-## Project structure
+**No cloud. No accounts. No audio ever leaves your PC.**
 
-```
-JARVIS/
-├── main.py                  # JARVIS class + main loop (voice & --text modes)
-├── config.py                # typed safe getters, loads all settings from .env
-├── .env                     # YOUR settings (never commit this)
-├── .env.example             # template with defaults & comments
-├── requirements.txt
-├── engine/                  # audio I/O
-│   ├── microphone.py        # sounddevice mic source (no PyAudio)
-│   ├── stt.py               # sounddevice capture → Google STT via HTTP (raw PCM)
-│   └── tts.py               # pyttsx3 queue + daemon worker (non-blocking)
-├── brain/                   # AI brain
-│   ├── ollama_client.py     # llama3.2:3b via Ollama /api/chat (streaming + timing)
-│   ├── memory.py            # rolling memory + character trimming (follow-ups!)
-│   └── router.py            # COMMAND / AI_QUESTION / FAST_RESPONSE / EXIT / CLEAR_MEMORY
-├── commands/
-│   ├── registry.py          # dispatches local commands
-│   ├── system_commands.py   # open apps/websites, screenshots
-│   └── time_commands.py     # time & date
-└── utils/
-    └── logger.py            # console + file logging
-```
+<br/>
 
-## Requirements
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![ASR](https://img.shields.io/badge/ASR-Faster--Whisper-22d3ee?style=for-the-badge)](https://github.com/SYSTRAN/faster-whisper)
+[![TTS](https://img.shields.io/badge/TTS-Piper%20ONNX-f472b6?style=for-the-badge)](https://github.com/rhasspy/piper)
+[![LLM](https://img.shields.io/badge/LLM-llama3.2%20via%20Ollama-fbbf24?style=for-the-badge)](https://ollama.com)
+[![Offline](https://img.shields.io/badge/Privacy-100%25%20Local-34d399?style=for-the-badge)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)]()
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-- **Windows 10/11**
-- **Python 3.10–3.14** — download from [python.org](https://python.org)
-- **Ollama** (local model server) — see below
+</div>
 
 ---
 
-## Installation (Windows)
+## ⚡ Project Status
 
-### 1. Create a virtual environment
+**Active personal project.** The end-to-end pipeline — *mic → VAD → STT → router/LLM → TTS* — is working and tuned on the author's Windows machine. This is a hobby-grade assistant: no releases, no version guarantees, no stable public API. Expect it to perform best in the environment it was tuned for.
+
+---
+
+## ✨ Features
+
+| | Capability | Why it matters |
+|---|---|---|
+| 🎤 | **Adaptive VAD capture** | Auto-calibrates to your mic's ambient noise and records *only* the utterance — no fixed-duration recording, no ENTER key |
+| 🧠 | **Faster-Whisper STT** | On-device speech-to-text (`base`, `int8`, CPU) |
+| 🧭 | **Deterministic command router** | Fixed, safe local commands (apps, time, date) execute instantly and predictably |
+| 🤖 | **llama3.2 conversational brain** | Anything the router doesn't match is answered by llama3.2 through local Ollama |
+| 🔊 | **Piper neural TTS** | Natural offline text-to-speech (ONNX, no cloud TTS) |
+| 🔒 | **100% local / offline** | All inference happens on your machine; audio is processed in memory |
+| ⚡ | **In-memory audio** | No temp WAV files in the production path — audio lives only in RAM |
+| 📊 | **Pipeline timing** | Every stage (capture, STT, routing, LLM, TTS) is timed and reported per turn |
+
+---
+
+## 🧬 Architecture
+
+<img src="docs/architecture-animated.svg" alt="JARVIS Pipeline" width="90%"/>
+
+For a GitHub-native rendering, the same pipeline in Mermaid:
+
+```mermaid
+flowchart LR
+    A["🎤 Microphone"] -->|"16 kHz float32"| B["Adaptive VAD"]
+    B -->|"speech detected"| C["Faster-Whisper"]
+    C -->|"text"| D{"Command Router"}
+    D -->|"matched"| F["💻 Execute local command"]
+    D -->|"no match"| E["llama3.2 via Ollama"]
+    F --> G["🔊 Piper TTS"]
+    E --> G
+    G --> H["Speaker"]
+```
+
+**The pipeline, stage by stage:**
+
+1. **Capture** — `sounddevice` streams 16 kHz mono `float32` audio straight into memory (`audio/microphone.py`).
+2. **Voice Activity Detection** — an adaptive RMS threshold with noise-EMA tracks ambient noise and detects speech start/stop (`audio/vad.py`).
+3. **Transcription** — Faster-Whisper converts the utterance to text on-device (`speech/whisper.py`).
+4. **Routing** — `CommandRouter` matches fixed, safe commands first for instant local actions. Anything unmatched falls back to **llama3.2** through Ollama (`commands/router.py`, `ai/ollama.py`).
+5. **Speech** — Piper synthesizes the reply and plays it back (`speech/tts.py`).
+
+### Why this architecture?
+
+**Deterministic commands run *before* the LLM.** Local actions (opening apps, telling time/date) are frequent, fast, and must behave identically every time. An LLM is neither fast enough nor reliable enough for that. The router gives instant, predictable OS commands; the LLM is reserved for open-ended questions where flexibility is the point.
+
+**llama3.2 never executes system commands.** The LLM only produces *spoken text*. Every OS-level action comes from a fixed mapping in the router — never from model output (see [Security](#-security)).
+
+---
+
+## 🎙️ How JARVIS Hears You
+
+<img src="docs/voice-pipeline.svg" alt="Voice Pipeline" width="85%"/>
+
+### 🔇 1. Voice Activity Detection
+
+`audio/vad.py` implements an **adaptive energy-based VAD**:
+
+- The first ~500 ms of frames build an initial noise estimate.
+- A frame is "speech" when its RMS exceeds `max(initial_threshold, noise_estimate × 3.0)`.
+- The noise estimate updates only during non-speech frames, so background-level changes don't require retuning.
+- Recording arms after ~250 ms of consistent speech and stops after ~900 ms of silence, or at the 15 s hard cap.
+
+### 📝 2. Speech Recognition
+
+`speech/whisper.py` loads a **Faster-Whisper `base` model once** (per `config.py`) and transcribes the in-memory float32 buffer with:
+
+- `device="cpu"`, `compute_type="int8"`
+- `language="en"`, `beam_size=1`
+- `vad_filter=True`, `condition_on_previous_text=False`
+
+The model downloads automatically on first run (a one-time network fetch during setup; inference is fully offline afterwards).
+
+---
+
+## 🧠 The Brain
+
+```
+      USER QUESTION
+           │
+           ▼
+   ┌── COMMAND ROUTER ──┐
+   │                     │
+   ▼                     ▼
+LOCAL COMMAND         LLAMA3.2
+   │                     │
+   └─────────┬───────────┘
+             ▼
+         RESPONSE
+```
+
+| Route | Mechanism | Behavior |
+|---|---|---|
+| **Deterministic command** | Fixed pattern matching in `commands/router.py` | Instant, repeatable, safe — opens apps, speaks time/date |
+| **Conversational AI** | llama3.2:3b via Ollama (`ai/ollama.py`) | Open-ended answers, spoken aloud by TTS |
+
+**Why this is safer:** local OS actions never pass through natural language. The LLM's output is *text only* — it cannot launch processes or run shell commands. Only pre-approved mappings in the router ever execute (see [Security](#-security)).
+
+---
+
+## 🔊 Giving JARVIS a Voice
+
+`speech/tts.py` uses **Piper** (`voices/en_US-lessac-medium.onnx`) to synthesize replies **in memory** and play them through `sounddevice`.
+
+```
+    TEXT
+     │
+     ▼
+   PIPER  ──►  NEURAL AUDIO  ──►  SPEAKER
+```
+
+- ONNX neural voice, fully offline.
+- No temp WAV files — audio synthesized and played from RAM.
+- TTS failures are logged, never fatal.
+
+---
+
+## ⚙️ How It Works (a single turn)
+
+In `main.py`, one spoken turn flows through:
+
+1. **Listen** — `SpeechRecorder` opens a stream and waits for speech, auto-starting on the first speech frames and auto-stopping after trailing silence (or a 15-second cap).
+2. **Transcribe** — the captured float32 buffer is transcribed in-memory by Faster-Whisper.
+3. **Filter** — transcriptions shorter than 2 characters or with fewer than 2 alphabetic characters are treated as noise and ignored.
+4. **Exit check** — if the whole utterance is an exit phrase (`exit`, `quit`, `goodbye`, `stop`, ...), JARVIS says *"Goodbye."* and shuts down.
+5. **Route** — the text is checked against the deterministic command router.
+6. **Act / Answer** — a matched command executes locally; otherwise llama3.2 (through Ollama) generates a concise spoken reply.
+7. **Speak** — Piper synthesizes and plays the response. Each stage's latency is logged.
+
+> If Ollama is down or the model is missing at startup, JARVIS still runs — it logs a warning and local commands keep working; only conversational questions are unavailable.
+
+---
+
+## 🛠️ Technology Stack
+
+| Layer | Tool | Notes |
+|---|---|---|
+| 🎤 **Audio I/O** | [sounddevice](https://python-sounddevice.readthedocs.io) | PortAudio bindings |
+| 🔇 **Voice activity** | Custom `AdaptiveVAD` | RMS threshold + noise EMA |
+| 📝 **Speech-to-text** | [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) | CTranslate2 · `base` · `int8` on CPU |
+| 🧠 **Language model** | [llama3.2:3b](https://ollama.com/library/llama3.2) via [Ollama](https://ollama.com) | Local, `keep_alive` 30 min |
+| 🔊 **Text-to-speech** | [Piper](https://github.com/rhasspy/piper) | ONNX · `en_US-lessac-medium` |
+| 🧭 **Commands** | Python deterministic router | Fixed, safe mappings |
+| 🧰 **Utilities** | [NumPy](https://numpy.org) · [Requests](https://requests.readthedocs.io) | |
+
+---
+
+## 📦 Requirements
+
+| Requirement | Notes |
+|---|---|
+| **OS** | Windows (the command router launches Windows apps; paths assume Windows) |
+| **Python** | 3.10+ recommended |
+| **Git** | To clone the repository |
+| **[Ollama](https://ollama.com/download)** | Runs llama3.2 locally; only needed for conversational answers |
+| **Microphone + speakers** | Any input/output device PortAudio can see |
+
+The repository does **not** ship a `requirements.txt`. Dependencies are installed directly (see below). The following packages are used by the code:
+
+| Package | Used by |
+|---|---|
+| `sounddevice` | Audio capture & playback |
+| `numpy` | Audio buffers / math |
+| `faster-whisper` | Speech-to-text |
+| `piper-tts` | Text-to-speech |
+| `requests` | Ollama HTTP client |
+| `scipy` | WAV-based test/diagnostic scripts only |
+| `ollama` (Python SDK) | `test_llama.py` only |
+
+---
+
+## 🚀 Installation
+
+Open **PowerShell** and run each block from top to bottom.
+
+### 1. Clone the repository
 
 ```powershell
+git clone https://github.com/bezawadamahidhar20-droid/JARVIS.git
 cd JARVIS
+```
+
+### 2. Create and activate a virtual environment
+
+```powershell
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Install Python dependencies
+> If PowerShell blocks the activation script, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first.
+
+### 3. Install dependencies
 
 ```powershell
-pip install -r requirements.txt
+pip install sounddevice numpy faster-whisper piper-tts requests scipy
 ```
 
-No PyAudio needed. The microphone uses `sounddevice` (bundles its own
-PortAudio DLLs), and speech recognition hits Google's HTTP API directly, so
-nothing extra has to compile on Python 3.14.
-
-### 3. Configure your settings
-
-```powershell
-Copy-Item .env.example .env
-notepad .env
-```
-
-Edit anything you like (owner name, TTS rate, model, …). All values have
-working defaults, so this step is optional.
-
-### 4. Install and start Ollama
-
-1. Download & install **Ollama** from <https://ollama.com/download>.
-2. Install the brain:
+### 4. Pull the llama3.2 model into Ollama
 
 ```powershell
 ollama pull llama3.2:3b
 ```
 
-3. Make sure it's running — the Ollama app runs it automatically, or:
+### 5. Download the Piper voice (one-time)
 
 ```powershell
-ollama serve
+python -m piper.download_voices en_US-lessac-medium
 ```
 
-Verify it's up: open <http://localhost:11434> in a browser (you'll see
-"Ollama is running").
+Then make sure the files are available at `voices\en_US-lessac-medium.onnx` (plus its `.json`) — the default path in `config.py`. The `voices/` directory is git-ignored, so a fresh clone won't include the voice files.
 
-### 5. Run JARVIS
+### 6. Verify the microphone
 
-Voice mode (needs a working microphone):
+```powershell
+python test_microphone_level.py
+```
+
+Speak normally for 5 seconds. You should see `✅ Microphone is receiving sound.` If not, see [Troubleshooting](#-troubleshooting).
+
+### 7. Run JARVIS
 
 ```powershell
 python main.py
 ```
 
-Text mode (no mic needed — great for testing):
+---
+
+## ⚙️ Configuration
+
+Everything lives in [`config.py`](config.py):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `SAMPLE_RATE` | `16000` | Capture sample rate (Hz) |
+| `INPUT_DEVICE` | `None` | `None` = system default mic; or a device index/name |
+| `INITIAL_RMS_THRESHOLD` | `0.012` | Floor below which nothing is ever speech |
+| `NOISE_MULTIPLIER` | `3.0` | Speech = noise × this |
+| `NOISE_EMA_ALPHA` | `0.15` | Noise-estimate smoothing |
+| `MIN_SPEECH_MS` / `SILENCE_MS` | `250` / `900` | Speech arm / stop timing |
+| `MAX_RECORD_MS` | `15000` | Hard cap per utterance |
+| `WHISPER_MODEL` | `"base"` | Try `"tiny.en"` vs `"base"` in the benchmark |
+| `WHISPER_COMPUTE_TYPE` | `"int8"` | CPU quantization |
+| `OLLAMA_MODEL` | `"llama3.2:3b"` | Local LLM |
+| `OLLAMA_NUM_PREDICT` | `120` | Short, voice-friendly replies |
+| `OLLAMA_KEEP_ALIVE` | `"30m"` | Keep model resident between turns |
+| `TTS_VOICE_PATH` | `"voices/en_US-lessac-medium.onnx"` | Piper voice |
+| `SYSTEM_PROMPT` | *(JARVIS personality)* | Instructs concise spoken answers |
+
+Tune capture/VAD in `audio/vad.py` and `audio/microphone.py` for your room and mic.
+
+---
+
+## 🚀 First Run
 
 ```powershell
-python main.py --text
+python main.py
+```
+
+You should see:
+
+```
+============================
+       JARVIS ONLINE
+============================
+[+] Command router ready
+[*] JARVIS is listening...
+
+[*] Listening...
+```
+
+Then speak. A realistic turn (timing values are **illustrative only** — they depend entirely on your hardware):
+
+```
+[*] Listening...
+[CAPTURE] 1.84 sec
+[i] [VOICE] Speech detected
+[WHISPER] 1.12 sec
+[USER] what is python
+[ROUTER] 0.00 sec
+[OLLAMA] 6.50 sec
+[JARVIS] Python is a high-level, general-purpose programming language known for its readability.
+[*] TTS: Speaking...
+[TTS] 2.30 sec
+[TOTAL] 11.76 sec
+```
+
+Say *"what time is it"*, *"open Chrome"*, *"what is the capital of France?"* — or simply *"goodbye"* to shut down.
+
+---
+
+## 🗺️ Supported Commands
+
+Anything the router doesn't match is sent to **llama3.2** for a conversational answer.
+
+| Voice command | Action |
+|---|---|
+| "what time is it" / "what's the time" | Speaks the current local time |
+| "what's today's date" / "what day is it" | Speaks the current date |
+| "open notepad" | Opens Notepad |
+| "open chrome" | Opens Chrome (found in standard install paths) |
+| "open file explorer" / "open explorer" | Opens File Explorer |
+| "open command prompt" / "open cmd" | Opens a terminal |
+| "open calculator" | Opens Calculator |
+| "goodbye" / "exit" / "quit" / "stop" | Exits JARVIS |
+| *anything else* | Answered by llama3.2 |
+
+> Chrome is located via `LOCALAPPDATA` and the standard `Program Files` paths. If it isn't found, JARVIS reports that it couldn't complete the command.
+
+---
+
+## 💬 Conversational Examples
+
+Questions are answered by llama3.2 locally. Output is illustrative — the exact wording varies.
+
+```
+[USER]   What is Python?
+[JARVIS] Python is a high-level, general-purpose programming language widely used
+         for web development, data science, and automation.
+
+[USER]   Explain recursion in simple words.
+[JARVIS] Recursion is when a function calls itself to solve a smaller version of
+         the same problem, until it reaches a base case.
+
+[USER]   What is the capital of France?
+[JARVIS] The capital of France is Paris.
 ```
 
 ---
 
-## Using JARVIS
+## ⏱️ Performance
 
-| You say | What happens |
+JARVIS measures and logs **pipeline latency** for every turn using `utils/logger.py`. Each label represents one stage:
+
+| Label | Measured span |
 |---|---|
-| "Hello JARVIS" / "Who are you" | **Instant canned reply** — no AI call |
-| "What is Python?" | AI explains it |
-| "Who is Elon Musk?" → "What companies does he own?" | **AI, with memory** — "he" resolves correctly |
-| "Tell me a joke" | AI tells a joke |
-| "What time is it?" / "What's the date?" | Local clock / calendar |
-| "Open YouTube" / "Go to GitHub" | Opens the website in your browser |
-| "Open notepad" / "Open calculator" | Launches the app |
-| "Take a screenshot" | Saves a PNG into `outputs/` |
-| "Clear memory" | Forgets the conversation |
-| "Goodbye" / "Exit" | Gracefully shuts down |
+| `[CAPTURE]` | Microphone stream open → utterance captured (VAD arming, speaking, trailing silence) |
+| `[WHISPER]` | Faster-Whisper transcription of the captured buffer |
+| `[ROUTER]` | Deterministic command matching |
+| `[OLLAMA]` | llama3.2 generation via Ollama *(only when the router doesn't match)* |
+| `[TTS]` | Piper synthesis + audio playback |
+| `[TOTAL]` | Whole turn, from "Listening..." to after the reply is spoken |
 
-**Anything** not in the command list goes to llama3.2:3b — that's the point.
-General questions, follow-ups, trivia, coding help… it's all answered.
+### Collect your own numbers
+
+The repository ships benchmarks that time each stage on **your** hardware:
+
+```powershell
+python test_whisper_benchmark.py   # tiny.en vs base on fresh mic captures
+python test_benchmark.py           # tiny.en vs base on a WAV file
+python test_ollama.py              # one llama3.2 generation, timed
+```
+
+### Honest expectations
+
+- **Local CPU inference is slower than cloud APIs.** Whisper and llama3.2 both run on your CPU unless you configure GPU acceleration in Ollama / CTranslate2.
+- **Model warm-up matters.** The first request after a cold start is noticeably slower while the model loads into memory. `keep_alive: 30m` keeps llama3.2 resident between turns to avoid reloads.
+- **Hardware dominates.** Whisper and Ollama latency scale directly with your CPU/RAM. A weak CPU will make STT and LLM turns take several seconds.
+- No benchmark results are stored in the repository — measure on your own machine.
 
 ---
 
-## Speed tuning
+## 🧪 Testing
 
-The stack is tuned for low latency on CPU:
+The repository ships standalone scripts (not a pytest suite) for verifying each stage. Some require a live microphone and interaction; others are offline.
 
-| Feature | What it does |
-|---|---|
-| `OLLAMA_STREAM=true` | Tokens arrive as generated; first sentence is spoken while the rest renders |
-| `OLLAMA_KEEP_ALIVE=30m` | Model stays loaded in RAM — no cold reload between questions |
-| `OLLAMA_NUM_PREDICT=150` | Caps answers at ~3 sentences, no rambling |
-| `OLLAMA_NUM_CTX=2048` | Smaller context window = faster prompt processing |
-| `MEMORY_MAX_TURNS=6` + `MEMORY_MAX_CHARS=3000` | Trims old turns so prompts stay short |
-| `ENABLE_FAST_RESPONSES=true` | Greetings answered instantly from a local table |
-| `ENABLE_WARMUP=true` | Background thread pre-loads the model at startup |
-| `STT_SILENCE_DURATION=0.7` | Faster phrase cut-off than the old 1.2 s |
+### Microphone / capture (interactive, require a mic)
 
-Timing is logged for every interaction as
-`[timing] first token 0.8s | total 3.2s | 47 tokens`.
-
----
-
-## Configuration reference (`.env`)
-
-| Key | Default | Meaning |
+| Test | Purpose | Command |
 |---|---|---|
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Your local Ollama server |
-| `OLLAMA_MODEL` | `llama3.2:3b` | Model used as the brain |
-| `OLLAMA_TIMEOUT` | `120` | Seconds to wait for a reply |
-| `OLLAMA_TEMPERATURE` | `0.7` | Creativity (0 strict → 1 wild) |
-| `OLLAMA_STREAM` | `true` | Stream tokens for instant first sentence |
-| `OLLAMA_NUM_PREDICT` | `150` | Max response length (tokens) |
-| `OLLAMA_NUM_CTX` | `2048` | Context window size |
-| `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays loaded in RAM |
-| `OLLAMA_NUM_GPU` | `99` | GPU offload (ignored on CPU-only boxes) |
-| `STT_LANGUAGE` | `en-US` | Speech-recognition language |
-| `STT_TIMEOUT` | `5` | Seconds to wait for speech to start |
-| `STT_PHRASE_LIMIT` | `10` | Max phrase length (seconds) |
-| `STT_SILENCE_DURATION` | `0.7` | Seconds of silence that ends a phrase |
-| `STT_CHUNK_DURATION` | `0.05` | Audio chunk length (seconds) |
-| `GOOGLE_STT_KEY` | *(built-in)* | Google speech API key |
-| `TTS_RATE` | `200` | Speaking rate (words/min) |
-| `JARVIS_NAME` | `JARVIS` | Assistant name |
-| `JARVIS_OWNER` | `Sir` | What JARVIS calls you |
-| `MEMORY_MAX_TURNS` | `6` | How many turns of context to remember |
-| `MEMORY_MAX_CHARS` | `3000` | Max characters of history per request |
-| `ENABLE_FAST_RESPONSES` | `true` | Instant canned greeting replies |
-| `ENABLE_WARMUP` | `true` | Pre-load model at startup |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `test_microphone.py` | Records 5 s and saves `test_audio.wav` | `python test_microphone.py` |
+| `test_microphone_level.py` | Reports mic peak/RMS and passes/fails the input level | `python test_microphone_level.py` |
+| `test_capture.py` | VAD auto start/stop capture, saves `captured_test.wav` | `python test_capture.py` |
+| `test_capture_quality.py` | One fresh sentence → stats → energy timeline → tiny.en vs base | `python test_capture_quality.py "Open Notepad."` |
+| `test_diagnostic_capture.py` | Full capture diagnostic: stats, timeline, playback, both models | `python test_diagnostic_capture.py [device_index]` |
+| `test_channel_analysis.py` | Per-channel mic analysis (channel 0 drives VAD) | `python test_channel_analysis.py` |
+| `test_whisper_benchmark.py` | Live mic benchmark: tiny.en vs base on the same captures | `python test_whisper_benchmark.py` |
+
+### Whisper (offline, needs a WAV file)
+
+| Test | Purpose | Command |
+|---|---|---|
+| `test_whisper.py` | Transcribes `test_audio.wav` with the `base` model | `python test_whisper.py` |
+| `test_benchmark.py` | Times tiny.en vs base on a WAV file | `python test_benchmark.py [file.wav]` |
+
+### Router (offline, no execution)
+
+| Test | Purpose | Command |
+|---|---|---|
+| `test_router.py` | Shows routing decisions without executing; add `--exec` to actually launch apps | `python test_router.py` |
+
+### LLM (requires Ollama + the llama3.2 model)
+
+| Test | Purpose | Command |
+|---|---|---|
+| `test_ollama.py` | Checks Ollama availability + runs one timed generation | `python test_ollama.py` |
+| `test_llama.py` | Minimal llama3.2 query using the `ollama` Python SDK | `python test_llama.py` |
+
+### TTS (requires the Piper voice + speakers)
+
+| Test | Purpose | Command |
+|---|---|---|
+| `test_tts.py` | Speaks a test sentence | `python test_tts.py` |
+
+> `test_whisper.py` needs `test_audio.wav`, which `test_microphone.py` produces. `test_llama.py` additionally needs the `ollama` Python package.
 
 ---
 
-## Troubleshooting
+## 🛠️ Troubleshooting
 
-**"Cannot reach Ollama at http://localhost:11434"**
-- Ollama isn't running. Start the Ollama app or run `ollama serve`.
-- Check <http://localhost:11434> in your browser.
+### Microphone not detected
 
-**"Model 'llama3.2:3b' is not installed"**
-- Run `ollama pull llama3.2:3b`.
+Run `python test_microphone_level.py` and `python test_diagnostic_capture.py`. If no input is found, check Windows **Settings → System → Sound → Input**, confirm the right default device, and verify the mic is not muted. You can select a specific device by setting `INPUT_DEVICE` in `config.py`.
 
-**The first AI answer feels slow**
-- That's the model cold-starting into RAM on the very first run after a
-  reboot. The background warm-up and `OLLAMA_KEEP_ALIVE=30m` keep every
-  later question fast. Raise `OLLAMA_TIMEOUT` if it ever times out.
+### No speech detected
 
-**"No microphone found"**
-- Check your mic is plugged in and not disabled in Windows Sound settings.
-- Run `python main.py --text` to test without a mic.
+- Confirm the mic is receiving sound (`test_microphone_level.py` shows `✅`).
+- The utterance may be below the VAD threshold — check `INITIAL_RMS_THRESHOLD` and `NOISE_MULTIPLIER` in `config.py`, or that you're not in a very noisy room.
+- Watch the energy timeline from `test_capture_quality.py` / `test_diagnostic_capture.py` to see whether speech is being captured at all.
 
-**Speech isn't being recognized / JARVIS hears nothing**
-- Check the mic isn't muted (Windows Sound → Input).
-- JARVIS only listens once it has finished speaking (echo guard), so keep
-  the room quiet while it talks.
+### Whisper transcription is inaccurate
 
-**No sound from JARVIS**
-- Check your default output device. pyttsx3 uses Windows SAPI5 voices.
-- JARVIS still prints replies to the console, so the loop keeps working.
+- Run `test_whisper_benchmark.py` or `test_capture_quality.py` to compare `tiny.en` vs `base` on the *same* captured audio.
+- Switch `WHISPER_MODEL` in `config.py` to `"base"` (default) or try `"small"` if your CPU can afford it.
+- Check for clipping or very quiet input (see capture stats) — microphone gain matters.
 
-**The AI answers are full of markdown (`**`, `##`, backticks)**
-- They shouldn't be — the system prompt forbids markdown and the TTS layer
-  strips it anyway. If you still see it, the reply you heard is the clean
-  version; the console shows the raw model output.
+### Ollama is slow
+
+This is expected on CPU. First-request latency includes model warm-up; `keep_alive: 30m` keeps it loaded between turns. Consider GPU acceleration in Ollama if available.
+
+### llama3.2 unavailable
+
+Confirm Ollama is running and the model is installed:
+
+```powershell
+ollama list
+ollama pull llama3.2:3b
+```
+
+Run `python test_ollama.py` for a clear error. JARVIS still runs without Ollama — only conversational answers are disabled.
+
+### Piper not speaking
+
+Check that `voices\en_US-lessac-medium.onnx` and its `.json` exist (the folder is git-ignored):
+
+```powershell
+python -m piper.download_voices en_US-lessac-medium
+python test_tts.py
+```
+
+Confirm your speakers/audio output device are working and not muted.
+
+### Speaker audio entering the microphone
+
+If JARVIS hears its own voice, enable **Windows microphone echo cancellation / noise suppression** (Settings → System → Sound → Microphone) and consider headset use. JARVIS has no echo cancellation of its own yet (see [Roadmap](#-roadmap)).
 
 ---
 
-## License
+## 📁 Project Structure
 
-MIT — see `LICENSE`.
+```
+JARVIS/
+├── main.py                  # Main loop: capture → STT → route/LLM → TTS
+├── config.py                # All tunable settings (audio, VAD, Whisper, Ollama, TTS)
+├── jarvis_voice.py          # Legacy prototype (fixed-duration recording, WAV files)
+├── ai/
+│   ├── __init__.py
+│   └── ollama.py            # llama3.2 client (Ollama /api/generate)
+├── audio/
+│   ├── __init__.py
+│   ├── microphone.py        # Streaming capture + speech segmentation (in-memory)
+│   └── vad.py               # Adaptive voice activity detection
+├── commands/
+│   ├── __init__.py
+│   └── router.py            # Fixed, safe command mappings
+├── speech/
+│   ├── __init__.py
+│   ├── whisper.py           # Faster-Whisper wrapper
+│   └── tts.py               # Piper TTS wrapper
+├── utils/
+│   ├── __init__.py
+│   └── logger.py            # Logging + per-stage timing helpers
+├── voices/                  # Piper ONNX voice files (git-ignored)
+├── docs/
+│   ├── hero-core.svg        # Animated AI core (hero)
+│   ├── architecture-animated.svg  # Animated pipeline diagram
+│   ├── voice-pipeline.svg   # Waveform illustration
+│   └── architecture.svg     # Static architecture diagram
+├── test_*.py                # Microphone / STT / router / LLM / TTS diagnostics
+├── LICENSE                  # MIT License
+└── README.md
+```
+
+Key entry points: `main.py` runs the assistant; `config.py` is the single place to tune behavior.
+
+---
+
+## 🏗️ Design Decisions
+
+### Faster-Whisper (speech-to-text)
+Local CPU transcription that runs entirely on-device. `int8` quantization keeps latency acceptable on CPU with minimal accuracy loss versus `base` — fast enough for interactive voice, accurate enough for commands and questions.
+
+### Piper (text-to-speech)
+An offline neural voice shipped as a small ONNX model. Synthesizes in-memory float audio with no cloud round-trip and no temp files, so the whole loop stays local and private.
+
+### Ollama + llama3.2 (conversation)
+A locally served 8B model gives real conversational ability without external accounts. `keep_alive` keeps it resident between turns; a hard token cap keeps replies short enough to speak aloud.
+
+### Deterministic command router
+Local OS actions are too safety- and latency-sensitive to leave to an LLM. Fixed pattern matching gives instant, repeatable behavior and a hard security boundary: **only pre-approved actions ever execute** (see [Security](#-security)).
+
+### Adaptive VAD
+Fixed-duration recording is wasteful and sloppy. An RMS threshold that tracks ambient noise, combined with a ring buffer of pre-speech frames, records exactly the utterance — start to end — without cutting words off.
+
+---
+
+## 🔒 Security
+
+- **Command routing is deterministic.** Local actions come only from fixed mappings in `commands/router.py`. They are never constructed from arbitrary text.
+- **LLM output is never executed.** llama3.2 responses are text spoken aloud by TTS only. The model cannot launch processes or run shell commands.
+- **Windows commands are explicitly mapped.** The router launches a small, curated set (Notepad, Chrome, Explorer, Command Prompt, Calculator) via `os.startfile` / `subprocess.Popen` with hardcoded targets.
+- **No arbitrary shell execution** is exposed through natural-language model output — by design.
+
+JARVIS does **not** sandbox its processes. As with any assistant that can launch apps, the Windows session in which it runs is trusted. Keep the deterministic boundary above intact.
+
+---
+
+## 🕵️ Privacy
+
+JARVIS is designed to be **100% local**:
+
+- Audio is captured and processed **in memory** — the production path never writes WAV files.
+- Speech-to-text (Faster-Whisper), conversation (llama3.2/Ollama), and text-to-speech (Piper) all run on your machine.
+- No accounts, no telemetry, no cloud APIs are called during normal operation. **Audio does not leave your PC.**
+
+Two one-time setup fetches are required the first time, and only download *model files*, not your data:
+
+1. Faster-Whisper downloads the Whisper model on first run.
+2. Piper voice files are downloaded explicitly (see installation) into `voices/`.
+
+Ollama serves the model on `localhost:11434` — bound to your machine by default. No external service receives your speech or queries.
+
+---
+
+## ⚠️ Limitations
+
+Honest caveats:
+
+- **Windows-focused.** The command router targets Windows apps and paths (`os.startfile`, `chrome.exe` lookup, `cmd.exe`).
+- **CPU inference latency.** Whisper and llama3.2 run on CPU by default; long turns can take several seconds.
+- **Microphone / environment sensitivity.** VAD quality depends on your mic, gain, and room noise. JARVIS has no echo cancellation, so speakers playing into the mic can cause mis-capture.
+- **Hardware-dependent performance.** Transcription and LLM speed scale with your CPU/RAM.
+- **llama3.2 has no live/current information.** Its knowledge is fixed at training time; questions about current events may be wrong or outdated unless an external data source is added later.
+- **Recognition degrades with noisy audio.** Background noise reduces Whisper accuracy and can confuse the VAD.
+- **Single-utterance turns.** No wake word, no interruption support, and no multi-turn conversation memory yet.
+
+---
+
+## 🗺️ Roadmap
+
+Planned / future work (not yet implemented):
+
+- **Wake-word detection** — activate JARVIS only after a hotword.
+- **Interruption / barge-in** — stop speaking when the user talks.
+- **Echo cancellation** — better separation of speakers' audio from the mic.
+- **Current-information tools** — a local source or opt-in connector for live data.
+- **More desktop commands** — broader app catalog and window control.
+- **Configurable personalities** — alternate system prompts/voices.
+- **Conversation memory** — multi-turn context across utterances.
+- **GUI** — visual status, device selection, and diagnostics.
+- **Richer diagnostics** — device/level graphs and capture reports.
+- **GPU acceleration** — optional CTranslate2 / Ollama GPU offload.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome. Keep it simple:
+
+1. **Fork** the repository.
+2. **Create a branch** (`git checkout -b feature/your-feature`).
+3. **Make your change** — keep the local/offline architecture and the deterministic command boundary intact.
+4. **Run the tests** — verify with the relevant `test_*.py` scripts.
+5. **Open a Pull Request** describing what changed and how you verified it.
+
+---
+
+## 📜 License
+
+Distributed under the **MIT License**. See [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+<br/>
+
+**Made with ⚡ on Earth, running 100% offline.**
+
+<br/>
+
+</div>
