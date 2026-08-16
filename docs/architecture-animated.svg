@@ -55,7 +55,7 @@
   <!-- MICROPHONE -->
   <rect x="220" y="100" width="280" height="66" rx="14" fill="url(#node1)" stroke="url(#nodeCyan)" stroke-width="1.8"/>
   <text x="360" y="127" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#67e8f9">🎤 MICROPHONE</text>
-  <text x="360" y="150" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">SoundDevice · 16 kHz · float32</text>
+  <text x="360" y="150" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">sounddevice · 16 kHz · int16</text>
 
   <!-- Arrow 1 -->
   <line x1="360" y1="166" x2="360" y2="215" stroke="url(#arrowGrad)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
@@ -63,10 +63,10 @@
   </line>
   <text x="380" y="194" font-family="Consolas, monospace" font-size="10.5" fill="#67e8f9">stream</text>
 
-  <!-- VAD -->
+  <!-- SPEECH DETECTION -->
   <rect x="220" y="220" width="280" height="66" rx="14" fill="url(#node1)" stroke="url(#nodePurple)" stroke-width="1.8"/>
-  <text x="360" y="247" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#c4b5fd">🔇 ADAPTIVE VAD</text>
-  <text x="360" y="270" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">RMS + noise-EMA · speech start/stop</text>
+  <text x="360" y="247" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#c4b5fd">🔇 SPEECH DETECTION</text>
+  <text x="360" y="270" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">RMS threshold · silence cut-off</text>
 
   <!-- Arrow 2 -->
   <line x1="360" y1="286" x2="360" y2="335" stroke="url(#arrowGrad)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
@@ -74,10 +74,10 @@
   </line>
   <text x="380" y="314" font-family="Consolas, monospace" font-size="10.5" fill="#c4b5fd">utterance</text>
 
-  <!-- FASTER-WHISPER -->
+  <!-- GOOGLE STT -->
   <rect x="220" y="340" width="280" height="66" rx="14" fill="url(#node1)" stroke="url(#nodeCyan)" stroke-width="1.8"/>
-  <text x="360" y="367" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#67e8f9">📝 FASTER-WHISPER</text>
-  <text x="360" y="390" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">base · int8 · on-device STT</text>
+  <text x="360" y="367" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#67e8f9">📝 GOOGLE STT</text>
+  <text x="360" y="390" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">raw PCM · HTTP · no PyAudio/FLAC</text>
 
   <!-- Arrow 3 -->
   <line x1="360" y1="406" x2="360" y2="455" stroke="url(#arrowGrad)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
@@ -110,7 +110,7 @@
   <text x="590" y="652" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#fcd34d">🤖 LLAMA3.2 · OLLAMA</text>
   <text x="590" y="675" text-anchor="middle" font-family="Consolas, monospace" font-size="11" fill="#94a3b8">local LLM · 3B</text>
 
-  <!-- Merge back to PIPER -->
+  <!-- Merge back to TTS -->
   <path d="M130 691 L130 740 L360 740 L360 770" fill="none" stroke="url(#nodeGreen)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
     <animate attributeName="stroke-dashoffset" from="34" to="0" dur="1.2s" repeatCount="indefinite"/>
   </path>
@@ -121,10 +121,10 @@
   <!-- RESPONSE note -->
   <text x="360" y="758" text-anchor="middle" font-family="Consolas, monospace" font-size="11" fill="#94a3b8">response</text>
 
-  <!-- PIPER TTS -->
+  <!-- TTS -->
   <rect x="220" y="775" width="280" height="66" rx="14" fill="url(#node1)" stroke="url(#nodePurple)" stroke-width="1.8"/>
-  <text x="360" y="802" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#c4b5fd">🔊 PIPER TTS</text>
-  <text x="360" y="825" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">ONNX · neural · offline</text>
+  <text x="360" y="802" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#c4b5fd">🔊 pyttsx3 TTS</text>
+  <text x="360" y="825" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#94a3b8">Windows SAPI5 · queue + worker</text>
 
   <!-- Arrow final -->
   <line x1="360" y1="841" x2="360" y2="895" stroke="url(#arrowGrad)" stroke-width="2.5" stroke-dasharray="10 7" marker-end="url(#arrowhead)">
