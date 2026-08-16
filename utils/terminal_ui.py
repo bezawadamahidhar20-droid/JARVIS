@@ -25,7 +25,7 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional
 
 from rich import box
-from rich.console import Console, Group, RenderableType
+from rich.console import Console, Group, RenderResult, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -66,8 +66,15 @@ class _Dashboard:
     def __init__(self, ui: "TerminalUI") -> None:
         self.ui = ui
 
-    def __rich_console__(self, console: Console, options) -> RenderableType:
-        return self.ui._build_layout()  # noqa: SLF001
+    def __rich_console__(
+        self, console: Console, options
+    ) -> RenderResult:
+        # Yield (not return!): rich iterates the result of __rich_console__,
+        # and Layout has no __iter__ — a returned Layout falls back to the
+        # legacy sequence protocol (layout[0], layout[1], ...) and crashes
+        # with KeyError('No layout with name 0'). Yielding is the rich
+        # contract and lets console.render handle the Layout recursively.
+        yield self.ui._build_layout()  # noqa: SLF001
 
 
 class TerminalUI:
