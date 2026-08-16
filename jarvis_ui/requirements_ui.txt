@@ -1,0 +1,17 @@
+# JARVIS UI — additional dependencies (PySide6 / Qt6 desktop interface)
+# Install alongside the base backend requirements:
+#   pip install -r requirements.txt -r jarvis_ui/requirements_ui.txt
+#
+# Framework choice: PySide6 (Qt6) — chosen over PyQt5 (no Python 3.14 wheels),
+# tkinter (no hardware-accelerated OpenGL canvas) and customtkinter (tkinter-based,
+# cannot embed a real OpenGL context). PySide6 provides QOpenGLWidget, which is
+# the only clean way to run PyOpenGL at 60fps inside a desktop UI.
+
+PySide6>=6.6.0          # Qt6 for Python — main UI framework
+PyOpenGL>=3.1.7         # OpenGL bindings for the 3D neural sphere
+numpy>=1.26             # particle system + vector math (also used by backend)
+psutil>=5.9             # live CPU / RAM monitoring for the HUD panels
+sounddevice>=0.5.0      # microphone level monitoring for the waveform
+
+# The rest of the JARVIS backend (speech recognition, pyttsx3, ollama client,
+# commands) comes from the project's base requirements.txt.

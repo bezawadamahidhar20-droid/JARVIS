@@ -1,0 +1,1 @@
+"""Animation overlays: boot sequence, scan line and transitions."""
